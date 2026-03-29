@@ -1,0 +1,30 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [ "main" ] # 메인 브랜치에 푸시될 때 작동
+
+jobs:
+  deploy:
+    runs-on: self-hosted # 방금 연결한 초록불(러너)에서 실행하라는 뜻!
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Build and Run Docker Container
+        run: |
+          # 1. 기존에 돌아가던 컨테이너가 있다면 중지 및 삭제
+          docker stop hub-backend-app || true
+          docker rm hub-backend-app || true
+          
+          # 2. 새로운 이미지 빌드
+          docker build -t hub-backend-image .
+          
+          # 3. 컨테이너 실행 (네트워크는 우리 인프라 네트워크 사용)
+          docker run -d \
+            --name hub-backend-app \
+            --network devops-network \
+            -p 3000:3000 \
+            --restart always \
+            hub-backend-image
