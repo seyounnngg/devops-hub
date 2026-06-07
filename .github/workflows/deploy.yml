@@ -12,9 +12,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Build and Run Docker Container
+      - name: Deploy Backend (via single-source script)
         run: |
-          docker build -t hub-backend-image .
-          docker stop hub-backend-app || true
-          docker rm hub-backend-app || true
-          docker run -d -p 3000:3000 --name hub-backend-app --network devops-network hub-backend-image
+          /home/dev/deploy-backend.sh
