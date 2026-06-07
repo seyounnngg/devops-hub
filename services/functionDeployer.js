@@ -5,6 +5,8 @@
  * - Runs a small Node HTTP server in a container
  * - Returns a callable endpoint that responds with JSON
  */
+const { createProxyHost } = require('./NpmProxyManager');
+
 async function deploy(params, { addLog }) {
     const { 
         name: projectName, 
@@ -165,18 +167,26 @@ server.listen(3000, () => {
         await new Promise(r => setTimeout(r, 1500));
         const { stdout: psOut } = await execAsync(`docker ps --filter "name=${containerName}" --format "{{.Status}}"`);
         
+        let finalUrl = endpoint;
         if (psOut.includes('Up')) {
-          addLog(`✅ Function running at ${endpoint}`);
+          // Call createProxyHost() AFTER container is confirmed running (exactly like webDeployer post-health).
+          // On success: finalUrl becomes https://<slug>.hgu.app (when AUTO_SSL_ENABLED + cert succeeds).
+          try {
+            const proxyResult = await createProxyHost({
+              projectName,
+              forwardPort: externalPort,
+              addLog
+            });
+            if (proxyResult.success && proxyResult.url) {
+              finalUrl = proxyResult.url;
+            } else if (proxyResult.error) {
+              addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. Using port URL.`);
+            }
+          } catch (proxyErr) {
+            addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
+          }
 
-          // === DEMO INSTRUCTION (Option 1 - via existing NPM + Let's Encrypt) ===
-          addLog(`📌 [DEMO] For nice subdomain + HTTPS using your current NPM setup:`);
-          addLog(`   1. Go to Nginx Proxy Manager`);
-          addLog(`   2. Add Proxy Host:`);
-          addLog(`      Domain: demo-function.hgu.app`);
-          addLog(`      Forward to: ${serverHost} : ${externalPort}`);
-          addLog(`      SSL: Use your existing Let's Encrypt certificate`);
-          addLog(`   3. Access at https://demo-function.hgu.app`);
-          // === End demo instruction ===
+          addLog(`✅ Function running at ${finalUrl}`);
         } else {
           const { stdout: logs } = await execAsync(`docker logs ${containerName} 2>&1 | tail -30`);
           addLog(`❌ Function container exited quickly. Last logs:`);
@@ -221,7 +231,7 @@ server.listen(3000, () => {
             containerName,
             imageName,
             port: externalPort,
-            url: endpoint,
+            url: finalUrl,
             status: 'running',
             serviceType: 'function',
             githubUserId: githubUserId || null
@@ -231,6 +241,7 @@ server.listen(3000, () => {
             success: true,
             serviceType: 'function',
             endpoint,
+            url: finalUrl,
             message: 'Function is live and callable.'
         };
     } catch (err) {
