@@ -697,6 +697,18 @@ app.delete('/deployments/:id', async (req, res) => {
         exec(`docker rm ${deployment.container_name}`);
         exec(`docker rmi ${deployment.image_name}`);
 
+        // NPM Proxy Host cleanup (non-blocking, never fails the deletion)
+        try {
+            const { deleteProxyHost } = require('./services/NpmProxyManager');
+            const addLog = (msg) => console.log(msg);
+            await deleteProxyHost({
+                projectName: deployment.project_name,
+                addLog
+            });
+        } catch (npmErr) {
+            console.error('NPM Proxy Host cleanup error (non-fatal):', npmErr.message);
+        }
+
         await pool.execute(
             'DELETE FROM deployments WHERE id = ?',
             [id]

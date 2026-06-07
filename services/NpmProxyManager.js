@@ -167,7 +167,59 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
   };
 }
 
+/**
+ * Delete the Proxy Host for the given project name (if it exists).
+ * Reuses the same token acquisition and slugify logic as createProxyHost().
+ * Never throws; logs warning on failure so deletion can continue.
+ */
+async function deleteProxyHost({ projectName, addLog = console.log }) {
+  const npmApiUrl = process.env.NPM_API_URL || DEFAULT_NPM_API_URL;
+  const npmEmail = process.env.NPM_EMAIL || '';
+  const npmPassword = process.env.NPM_PASSWORD || '';
+
+  const domain = `${slugifyForDomain(projectName)}.hgu.app`;
+
+  if (!npmEmail || !npmPassword) {
+    addLog('⚠️ [NPM] NPM_EMAIL / NPM_PASSWORD not configured. Skipping Proxy Host deletion.');
+    return;
+  }
+
+  let token;
+  try {
+    token = await getNpmToken(npmApiUrl, npmEmail, npmPassword);
+  } catch (e) {
+    addLog(`⚠️ [NPM] Failed to authenticate with NPM for deletion: ${e.message}`);
+    return;
+  }
+
+  try {
+    const listResp = await axios.get(`${npmApiUrl}/nginx/proxy-hosts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+
+    const match = (listResp.data || []).find(p =>
+      p && p.domain_names && p.domain_names.includes(domain)
+    );
+
+    if (match && match.id) {
+      await axios.delete(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 30000
+      });
+      addLog(`✅ [NPM] Deleted Proxy Host for ${domain} (id: ${match.id})`);
+    } else {
+      addLog(`ℹ️ [NPM] No Proxy Host found for ${domain} (nothing to delete)`);
+    }
+  } catch (err) {
+    const detail = err.response?.data?.error || err.message || 'unknown error';
+    addLog(`⚠️ [NPM] Failed to delete Proxy Host for ${domain}: ${detail}. Deletion will continue.`);
+    // Do not throw - deletion must succeed
+  }
+}
+
 module.exports = {
   createProxyHost,
+  deleteProxyHost,
   slugifyForDomain
 };
