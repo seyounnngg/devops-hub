@@ -3,6 +3,7 @@ const { promisify } = require('util');
 const execAsync = promisify(exec);
 const path = require('path');
 const { safeInsertDeployment } = require('../utils/dbHelpers');
+const { createProxyHost } = require('./NpmProxyManager');
 
 // New auto-detection modules (for Dockerfile-less Web deployments)
 // Wrapped in try/catch so the backend doesn't crash on startup if the files are missing
@@ -226,6 +227,24 @@ async function deploy(params, { addLog }) {
             addLog('🩺 No healthcheck defined in image (common for student projects)');
         }
 
+        // Call NpmProxyManagerService only after container started + health check
+        // (minimal integration per requirements)
+        let finalUrl = url;
+        try {
+            const proxyResult = await createProxyHost({
+                projectName,
+                forwardPort: externalPort,
+                addLog
+            });
+            if (proxyResult.success && proxyResult.url) {
+                finalUrl = proxyResult.url;
+            } else if (proxyResult.error) {
+                addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. Using port URL.`);
+            }
+        } catch (proxyErr) {
+            addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
+        }
+
         // (URL variables already calculated earlier for logging)
 
         // Save to DB (with owner for per-user isolation)
@@ -236,7 +255,7 @@ async function deploy(params, { addLog }) {
             containerName,
             imageName,
             port: externalPort,
-            url,
+            url: finalUrl,
             status: 'running',
             serviceType: 'web',
             githubUserId
@@ -249,14 +268,14 @@ async function deploy(params, { addLog }) {
         }
 
         addLog('✅ [6/6] Web service is now live');
-        addLog(`🌐 Final access URL: ${url}`);
+        addLog(`🌐 Final access URL: ${finalUrl}`);
         if (!PUBLIC_DOMAIN || PUBLIC_DOMAIN === 'hgu.app') {
             addLog('   (Subdomain may not work in lab environments without DNS setup — use the port URL above.)');
         }
 
         return {
             success: true,
-            url,
+            url: finalUrl,
             serviceType: 'web',
             externalPort,
             internalPort,
