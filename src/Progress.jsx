@@ -59,13 +59,15 @@ function Progress() {
                lower.includes('function deployment failed');
     });
 
-    // Success ONLY when the *last* log of the *current* run is the final message.
-    // This guarantees the "Deployment Successful" + URL box appear *after* the
-    // entire deployment (including the dispatcher "completed" line) has finished.
-    // The first few polls often return old DB data (before this run's in-memory logs exist),
-    // so the "last log of current run" check + reset is critical.
-    const hasSucceeded = currentRunLogs.length > 0 &&
-        currentRunLogs[currentRunLogs.length - 1].includes("Deployment process completed");
+    // Success if "Deployment process completed" has appeared anywhere in the current run.
+    // We use .some() (not last-log only) because Function and Cron continue to append
+    // runtime logs ([FUNCTION CALL]..., [Cron] executions...) *after* the initial deployment
+    // finishes. Checking only the last log would make the success banner + URL + buttons
+    // disappear every time a new runtime log arrives from the background streamer.
+    // The currentRunLogs reset on "🚀 Deployment started" already protects against old persisted logs.
+    const hasSucceeded = currentRunLogs.some(log =>
+        typeof log === 'string' && log.includes("Deployment process completed")
+    );
 
     useEffect(() => {
 
@@ -128,7 +130,7 @@ function Progress() {
                     {projectName}
                 </h1>
                 <p className="text-zinc-400">
-                    Real-time build logs. APK builds usually take 5–10 minutes.
+                    Real-time build logs. APK builds usually take 1-5 minutes.
                 </p>
             </div>
 
@@ -196,12 +198,26 @@ function Progress() {
                                 const isApk = currentRunLogs.some(log => log.includes("APK") || log.includes("apk"));
 
                                 if (isApk) {
-                                    const apkLog = currentRunLogs.find(log => log.includes("/apks/"));
+                                    // Try to find explicit /apks/ path in logs (preferred, from updated apkBuilder)
                                     let downloadPath = null;
+                                    const apkLog = currentRunLogs.find(log => log.includes("/apks/"));
                                     if (apkLog) {
                                         const match = apkLog.match(/\/apks\/[\w-]+\.apk/);
                                         if (match) downloadPath = match[0];
                                     }
+
+                                    // Fallback: parse the build directory from clone log (e.g. /tmp/apk-builds/demo-app-17808...)
+                                    // and construct the expected APK path. This makes the button appear reliably.
+                                    if (!downloadPath) {
+                                        const buildDirLog = currentRunLogs.find(log => log.includes('/tmp/apk-builds/'));
+                                        if (buildDirLog) {
+                                            const dirMatch = buildDirLog.match(/\/tmp\/apk-builds\/([^\s\/]+)/);
+                                            if (dirMatch) {
+                                                downloadPath = `/apks/${dirMatch[1]}.apk`;
+                                            }
+                                        }
+                                    }
+
                                     const downloadUrl = downloadPath ? `https://api.hgu.app${downloadPath}` : null;
 
                                     return (
@@ -212,7 +228,7 @@ function Progress() {
                                                     href={downloadUrl} 
                                                     target="_blank" 
                                                     rel="noopener noreferrer"
-                                                    className="inline-block px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-sm font-semibold transition"
+                                                    className="inline-flex items-center justify-center px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-2xl transition"
                                                 >
                                                     Download APK
                                                 </a>
@@ -222,7 +238,24 @@ function Progress() {
                                         </div>
                                     );
                                 } else {
-                                    const serviceUrl = projectName ? `https://${projectName}.hgu.app` : null;
+                                    // Prefer the actual final URL logged by the deployer (after NPM proxy + SSL)
+                                    // e.g. "✅ Function running at https://..." or "🌐 Final access URL: https://..."
+                                    // Falls back to the projectName-based subdomain if no explicit URL in logs.
+                                    let serviceUrl = null;
+                                    for (let i = currentRunLogs.length - 1; i >= 0; i--) {
+                                        const log = currentRunLogs[i];
+                                        if (typeof log !== 'string') continue;
+                                        const m = log.match(/Final access URL:\s*(https?:\/\/\S+)/i) ||
+                                                  log.match(/running at\s*(https?:\/\/\S+)/i) ||
+                                                  log.match(/accessible at:\s*(https?:\/\/\S+)/i);
+                                        if (m) {
+                                            serviceUrl = m[1];
+                                            break;
+                                        }
+                                    }
+                                    if (!serviceUrl) {
+                                        serviceUrl = projectName ? `https://${projectName}.hgu.app` : null;
+                                    }
                                     if (serviceUrl) {
                                         return (
                                             <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4">

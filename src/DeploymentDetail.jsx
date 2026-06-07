@@ -135,7 +135,7 @@ function DeploymentDetail() {
                     <h1 className="text-4xl font-semibold tracking-[-1.5px]">{projectName}</h1>
                     {isApk && (
                         <p className="text-sm text-amber-400 mt-2">
-                            APK Build — first build can take 5–10 minutes
+                            APK Build — first build can take 1-5 minutes
                         </p>
                     )}
                 </div>
