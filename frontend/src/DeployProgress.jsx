@@ -3,63 +3,125 @@ import { useNavigate } from 'react-router-dom';
 
 function DeployProgress() {
     const navigate = useNavigate();
-    // 현재 배포가 어디까지 진행되었는지 기억하는 숫자 (0부터 시작)
     const [currentStep, setCurrentStep] = useState(0);
 
-    // 배포 단계 리스트
     const deploySteps = [
-        "📦 Clone Repository (GitHub에서 코드 가져오는 중...)",
-        "⚙️ Install Dependencies (필요한 패키지 설치 중...)",
-        "🔨 Build (프로젝트 빌드 중...)",
-        "🐳 Dockerize (도커 컨테이너 만드는 중...)",
-        "🔒 Apply SSL (HTTPS 보안 적용 중...)",
-        "✅ Deployment Complete (배포 완료!)"
+        "Cloning repository from GitHub",
+        "Installing dependencies",
+        "Building the project",
+        "Creating Docker container",
+        "Applying SSL / networking",
+        "Deployment complete"
     ];
 
-    // 💡 마법의 훅(useEffect): 화면이 켜지면 자동으로 실행되는 타이머
     useEffect(() => {
         if (currentStep < deploySteps.length - 1) {
             const timer = setTimeout(() => {
-                setCurrentStep((prev) => prev + 1); // 1.5초마다 다음 단계로 넘어감
-            }, 1500);
-            return () => clearTimeout(timer); // 타이머 청소
+                setCurrentStep((prev) => prev + 1);
+            }, 1600);
+            return () => clearTimeout(timer);
         }
     }, [currentStep, deploySteps.length]);
 
-    return (
-        <div style={{ padding: '40px', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-            <h2>🚀 배포 진행 중...</h2>
-            <p style={{ color: '#666' }}>화면을 벗어나지 마세요.</p>
+    const projectName = localStorage.getItem("currentProject") || "your project";
 
-            <div style={{ backgroundColor: '#f8f9fa', padding: '30px', borderRadius: '8px', width: '100%', maxWidth: '500px', marginTop: '20px' }}>
-                {deploySteps.map((stepText, index) => (
-                    <div key={index} style={{
-                        padding: '10px 0',
-                        fontSize: '16px',
-                        // 현재 단계보다 이전이면 초록색, 현재 단계면 파란색 굵게, 아직 안 온 단계면 회색
-                        color: index < currentStep ? 'green' : index === currentStep ? '#007bff' : '#ccc',
-                        fontWeight: index === currentStep ? 'bold' : 'normal',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '10px'
-                    }}>
-                        {/* 상태 아이콘 표시 */}
-                        <span>
-                            {index < currentStep ? '✔️' : index === currentStep ? '⏳' : '⚪'}
-                        </span>
-                        {stepText}
-                    </div>
-                ))}
+    return (
+        <div className="max-w-2xl mx-auto">
+            {/* Header */}
+            <div className="mb-8">
+                <div className="uppercase tracking-[3px] text-[10px] font-semibold text-zinc-500 mb-1">
+                    DEPLOYMENT PIPELINE
+                </div>
+                <h1 className="text-4xl font-semibold tracking-[-1.5px] mb-2">
+                    Deploying {projectName}
+                </h1>
+                <p className="text-zinc-400">
+                    Please keep this page open while we build and deploy your service.
+                </p>
             </div>
 
-            {/* 마지막 단계(배포 완료)에 도달하면 결과 확인 버튼 띄우기 */}
+            {/* Progress Card */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
+                <div className="flex items-center justify-between mb-6">
+                    <div className="text-sm font-medium text-zinc-400">Build Progress</div>
+                    <div className="text-sm font-mono text-zinc-500">
+                        {currentStep + 1} / {deploySteps.length}
+                    </div>
+                </div>
+
+                {/* Step List */}
+                <div className="space-y-3">
+                    {deploySteps.map((stepText, index) => {
+                        const isDone = index < currentStep;
+                        const isActive = index === currentStep;
+                        const isPending = index > currentStep;
+
+                        return (
+                            <div
+                                key={index}
+                                className={`flex items-center gap-4 px-5 py-3.5 rounded-2xl border transition-all ${
+                                    isActive 
+                                        ? 'border-white bg-zinc-950' 
+                                        : isDone 
+                                            ? 'border-emerald-900/50 bg-zinc-950/60' 
+                                            : 'border-zinc-800 bg-zinc-950/40'
+                                }`}
+                            >
+                                <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                                    isDone 
+                                        ? 'bg-emerald-500 text-black' 
+                                        : isActive 
+                                            ? 'bg-white text-black' 
+                                            : 'bg-zinc-800 text-zinc-500'
+                                }`}>
+                                    {isDone ? '✓' : index + 1}
+                                </div>
+
+                                <div className={`flex-1 text-base ${
+                                    isDone ? 'text-emerald-400 line-through' : 
+                                    isActive ? 'text-white font-medium' : 
+                                    'text-zinc-500'
+                                }`}>
+                                    {stepText}
+                                </div>
+
+                                {isActive && (
+                                    <div className="text-xs px-3 py-1 bg-white/10 text-white rounded-full tracking-wide">
+                                        IN PROGRESS
+                                    </div>
+                                )}
+                                {isDone && (
+                                    <div className="text-xs px-3 py-1 bg-emerald-500/10 text-emerald-400 rounded-full">
+                                        DONE
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+
+                {/* Progress Bar */}
+                <div className="mt-8">
+                    <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+                        <div 
+                            className="h-1 bg-white transition-all duration-500"
+                            style={{ width: `${((currentStep + 1) / deploySteps.length) * 100}%` }}
+                        />
+                    </div>
+                </div>
+            </div>
+
+            {/* Completion Action */}
             {currentStep === deploySteps.length - 1 && (
-                <button
-                    onClick={() => navigate('/detail')}
-                    style={{ padding: '12px 24px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', fontSize: '16px', cursor: 'pointer', marginTop: '30px' }}
-                >
-                    배포 상세 정보 / 로그 보러가기 ➡️
-                </button>
+                <div className="mt-8 flex justify-center">
+                    <button
+                        onClick={() => navigate('/detail')}
+                        className="px-8 py-3 bg-white text-black font-semibold rounded-2xl hover:bg-zinc-100 active:bg-zinc-200 transition flex items-center gap-3 text-sm"
+                    >
+                        View Deployment Details & Logs
+                        <span aria-hidden>→</span>
+                    </button>
+                </div>
             )}
         </div>
     );
