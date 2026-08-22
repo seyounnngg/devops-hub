@@ -16,6 +16,7 @@ require('dotenv').config();
 const fs = require('fs');
 
 const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSafeDomain } = require('./utils/validate');
+const { verifyWebhookSignature } = require('./utils/verifyWebhookSignature');
 
 // Ensure directories that will be used for builds and APK artifacts
 const APK_DIR = '/tmp/apks';
@@ -40,7 +41,9 @@ const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '.hgu.app';
 const COOKIE_SECURE = (process.env.COOKIE_SECURE || 'true').toLowerCase() !== 'false';
 
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
-app.use(express.json());
+// Keep the raw bytes around too — GitHub webhook signatures are computed over
+// the exact bytes it sent, which a re-serialized copy of req.body won't match.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(cookieParser());
 
 const MAX_CONCURRENT_DEPLOYMENTS_PER_USER = Number(process.env.MAX_CONCURRENT_DEPLOYMENTS_PER_USER || 5);
@@ -199,6 +202,35 @@ async function getAuthenticatedUser(req) {
     };
 }
 
+/**
+ * For flows with no JWT to decode from (GitHub webhook deliveries, background
+ * cleanup) — finds this user's most recently-issued still-valid session token
+ * and fetches their current username live (user_sessions doesn't store it;
+ * only the per-login JWT does, and that isn't available here).
+ * Returns null if the user has no active session anywhere (fully logged out).
+ */
+async function getLatestGithubIdentity(githubUserId) {
+    const [rows] = await pool.execute(
+        `SELECT github_access_token FROM user_sessions
+         WHERE github_user_id = ? AND expires_at > NOW() AND github_access_token IS NOT NULL
+         ORDER BY expires_at DESC LIMIT 1`,
+        [githubUserId]
+    );
+    if (rows.length === 0) return null;
+
+    const github_access_token = rows[0].github_access_token;
+    try {
+        const userResp = await axios.get('https://api.github.com/user', {
+            headers: { Authorization: `Bearer ${github_access_token}` },
+            timeout: 10000
+        });
+        return { id: githubUserId, username: userResp.data.login, github_access_token };
+    } catch (e) {
+        console.error(`Could not fetch GitHub username for user ${githubUserId}:`, e.message);
+        return null;
+    }
+}
+
 function sessionCookieOptions() {
     return {
         httpOnly: true,
@@ -236,6 +268,23 @@ async function removeDeploymentResources(deployment) {
         await deleteProxyHost({ projectName: deployment.project_name, addLog: (m) => console.log(m) });
     } catch (npmErr) {
         console.error('NPM Proxy Host cleanup error (non-fatal):', npmErr.message);
+    }
+
+    if (deployment.github_webhook_id) {
+        try {
+            const identity = await getLatestGithubIdentity(deployment.github_user_id);
+            if (identity) {
+                const { deleteWebhook } = require('./utils/githubWebhook');
+                await deleteWebhook({
+                    githubToken: identity.github_access_token,
+                    githubUsername: identity.username,
+                    repository: deployment.repository_name,
+                    webhookId: deployment.github_webhook_id
+                });
+            }
+        } catch (hookErr) {
+            console.error('GitHub webhook cleanup error (non-fatal):', hookErr.message);
+        }
     }
 
     if (deployment.apk_url) {
@@ -834,6 +883,63 @@ async function runRedeploy(user, deployment, { commitOverride = null, triggeredB
     await persistDeploymentLogs(user.id, deployment.project_name);
     return result;
 }
+
+// GitHub push webhook — public (no session), self-authenticated via a
+// per-deployment HMAC secret. X-GitHub-Hook-ID identifies *which* deployment's
+// secret to check (it's just a lookup key, not itself a trust boundary — an
+// attacker who guesses/forges it still can't produce a valid signature
+// without knowing that deployment's randomly-generated secret).
+app.post('/webhooks/github', async (req, res) => {
+    const hookId = req.headers['x-github-hook-id'];
+    const signature = req.headers['x-hub-signature-256'];
+    const event = req.headers['x-github-event'];
+
+    if (!hookId || !signature || !req.rawBody) {
+        return res.status(400).json({ error: 'Missing webhook headers' });
+    }
+
+    let deployment;
+    try {
+        const [rows] = await pool.execute('SELECT * FROM deployments WHERE github_webhook_id = ? LIMIT 1', [hookId]);
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Unknown webhook' });
+        }
+        deployment = rows[0];
+    } catch (e) {
+        console.error('[webhook] DB lookup failed:', e.message);
+        return res.status(500).json({ error: 'Internal error' });
+    }
+
+    if (!verifyWebhookSignature({ rawBody: req.rawBody, signatureHeader: signature, secret: deployment.webhook_secret })) {
+        return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    if (event === 'ping') {
+        return res.json({ success: true, message: 'pong' });
+    }
+    if (event !== 'push') {
+        return res.json({ success: true, message: `ignored (${event} event)` });
+    }
+
+    const pushedBranch = (req.body?.ref || '').replace('refs/heads/', '');
+    if (pushedBranch !== deployment.branch) {
+        return res.json({ success: true, message: `ignored (push to ${pushedBranch}, this deployment tracks ${deployment.branch})` });
+    }
+
+    const identity = await getLatestGithubIdentity(deployment.github_user_id);
+    if (!identity) {
+        console.error(`[webhook] No active session for user ${deployment.github_user_id} — cannot auto-redeploy ${deployment.project_name}. They need to log in again.`);
+        return res.json({ success: true, message: 'No active session for this project\'s owner — auto-redeploy skipped. Ask them to log in again.' });
+    }
+
+    // Respond right away — GitHub's webhook delivery has its own short timeout,
+    // and a build can take minutes. The redeploy keeps running in the background;
+    // progress shows up in the normal Live Logs / Deployment History UI.
+    res.json({ success: true, message: 'Redeploy triggered' });
+    runRedeploy(identity, deployment, { triggeredBy: 'webhook' }).catch((err) => {
+        console.error(`[webhook] Redeploy failed for ${deployment.project_name}:`, err.message);
+    });
+});
 
 async function loadOwnedWebDeployment(req, res) {
     const user = await getAuthenticatedUser(req);

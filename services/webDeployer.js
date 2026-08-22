@@ -3,10 +3,14 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { safeInsertDeployment, recordBuild } = require('../utils/dbHelpers');
 const { createProxyHost, updateProxyHost } = require('./NpmProxyManager');
 const { cloneRepo, cloneRepoAtCommit } = require('../utils/gitClone');
 const { allocatePort } = require('../utils/allocatePort');
+const { registerWebhook } = require('../utils/githubWebhook');
+
+const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'https://api.hgu.app';
 
 // New auto-detection modules (for Dockerfile-less Web deployments)
 let detectProjectType, ensureDockerfile;
@@ -351,6 +355,26 @@ async function deploy(params, { addLog }) {
             status: 'success',
             triggeredBy
         });
+
+        // Auto-redeploy on git push — only set up once, when the project is first created.
+        if (!isRedeploy) {
+            try {
+                const secret = crypto.randomBytes(32).toString('hex');
+                const callbackUrl = `${API_PUBLIC_URL}/webhooks/github`;
+                const hookResult = await registerWebhook({ githubToken, githubUsername, repository, secret, callbackUrl });
+                if (hookResult.success) {
+                    await pool.execute(
+                        'UPDATE deployments SET webhook_secret = ?, github_webhook_id = ? WHERE id = ?',
+                        [secret, hookResult.webhookId, deploymentRowId]
+                    );
+                    addLog(`✅ [GitHub] Auto-redeploy enabled — future pushes to "${branch}" will redeploy this project.`);
+                } else {
+                    addLog(`⚠️ [GitHub] Could not register a push webhook (${hookResult.error}). Auto-redeploy is off; use the Redeploy button instead.`);
+                }
+            } catch (hookErr) {
+                addLog(`⚠️ [GitHub] Unexpected error registering webhook (deployment continues): ${hookErr.message}`);
+            }
+        }
 
         addLog(isRedeploy ? '✅ [5/6] Deployment updated in database' : '✅ [5/6] Deployment recorded in database');
 
