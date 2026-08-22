@@ -1,12 +1,14 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const path = require('path');
+const fs = require('fs');
 const { safeInsertDeployment } = require('../utils/dbHelpers');
 const { createProxyHost } = require('./NpmProxyManager');
+const { cloneRepo } = require('../utils/gitClone');
+const { allocatePort } = require('../utils/allocatePort');
 
 // New auto-detection modules (for Dockerfile-less Web deployments)
-// Wrapped in try/catch so the backend doesn't crash on startup if the files are missing
 let detectProjectType, ensureDockerfile;
 
 try {
@@ -18,18 +20,21 @@ try {
   ensureDockerfile = () => null;
 }
 
+const MEM_LIMIT = process.env.DEPLOY_MEM_LIMIT || '512m';
+const CPU_LIMIT = process.env.DEPLOY_CPU_LIMIT || '1';
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+async function cleanupProjectDir(projectPath, addLog) {
+    if (!projectPath) return;
+    try {
+        await fs.promises.rm(projectPath, { recursive: true, force: true });
+    } catch (e) {
+        if (addLog) addLog(`⚠️ Could not clean up build directory: ${e.message}`);
+    }
+}
+
 /**
- * Web Service Deployer - MAIN FOCUS
- * 
- * Goal: Make this as close as possible to RS-02 and UC-03 in the Requirement Engineering doc.
- * 
- * Improvements in this version:
- * - Supports custom internal port (very important)
- * - Records commit hash
- * - Clear failure stage reporting
- * - Basic health check after container starts
- * - Better structured stages
- * - Accepts buildCommand / startCommand (prepared for future frontend)
+ * Web Service Deployer — Web is the primary/highest-priority service type.
  */
 async function deploy(params, { addLog }) {
     const {
@@ -39,9 +44,6 @@ async function deploy(params, { addLog }) {
         githubToken,
         githubUsername,
         pool,
-        // internalPort handled separately below to allow reassignment after detection
-        buildCommand,
-        startCommand,
         envVars = {},
         githubUserId = null
     } = params;
@@ -57,43 +59,32 @@ async function deploy(params, { addLog }) {
     let commitHash = null;
     let containerStarted = false;
 
-    // Allocate external port (simple MAX+1 for now)
-    const [rows] = await pool.execute('SELECT MAX(port) as maxPort FROM deployments');
-    const externalPort = rows[0].maxPort ? rows[0].maxPort + 1 : 3010;
+    const externalPort = await allocatePort(pool);
 
-    // Calculate access URLs early (needed for logs after container start)
     const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || 'hgu.app';
     const idealUrl = `https://${projectName}.${PUBLIC_DOMAIN}`;
 
     const serverHost = process.env.SERVER_HOST || process.env.HOSTNAME || 'localhost';
     const practicalUrl = `http://${serverHost}:${externalPort}`;
 
-    // Prefer subdomain only if a proper domain is configured; otherwise use practical port-based URL
     const url = (PUBLIC_DOMAIN && PUBLIC_DOMAIN !== 'hgu.app') ? idealUrl : practicalUrl;
 
     addLog(`📦 [1/6] Cloning repository (branch: ${branch})...`);
 
-    const cloneCommand = `git clone --branch ${branch} https://${githubToken}@github.com/${githubUsername}/${repository}.git ${projectPath}`;
-
     try {
-        await execAsync(cloneCommand, { timeout: 120000 });
+        await cloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath });
         addLog('✅ [1/6] Repository cloned successfully');
 
         // === Smart Dockerfile handling (support repos without a Dockerfile) ===
         let dockerfilePath = null;
 
         try {
-            const fs = require('fs');
             const contents = fs.readdirSync(projectPath);
 
             if (contents.includes('Dockerfile')) {
                 addLog('✅ Dockerfile found in repository root.');
                 dockerfilePath = path.join(projectPath, 'Dockerfile');
-            } else if (buildCommand && buildCommand.includes('Dockerfile')) {
-                // User is providing custom build command that handles Dockerfile
-                addLog('📝 Custom buildCommand provided. Using it as-is.');
             } else {
-                // Attempt auto-detection and Dockerfile generation
                 addLog('🔍 Dockerfile not found. Attempting to auto-detect project type...');
 
                 const detection = detectProjectType(projectPath);
@@ -117,7 +108,6 @@ async function deploy(params, { addLog }) {
                     }
                     dockerfilePath = generatedDockerfile;
 
-                    // Set correct internal port for auto-detected project types
                     if (!params.internalPort) {
                         if (detection.type === 'nextjs') {
                             internalPort = 3000;
@@ -139,9 +129,9 @@ async function deploy(params, { addLog }) {
             throw e;
         }
 
-        // Get commit hash (useful for traceability)
+        // Commit hash (traceability)
         try {
-            const { stdout } = await execAsync(`cd ${projectPath} && git rev-parse HEAD`);
+            const { stdout } = await execFileAsync('git', ['-C', projectPath, 'rev-parse', 'HEAD']);
             commitHash = stdout.trim().substring(0, 12);
             addLog(`📌 Commit: ${commitHash}`);
         } catch (e) {
@@ -151,24 +141,17 @@ async function deploy(params, { addLog }) {
         // Build
         addLog('🔨 [2/6] Building Docker image...');
 
-        let finalBuildCommand;
-        if (buildCommand) {
-            finalBuildCommand = buildCommand;
-        } else if (dockerfilePath) {
-            finalBuildCommand = `docker build -t ${imageName} -f ${dockerfilePath} ${projectPath}`;
-        } else {
-            finalBuildCommand = `docker build -t ${imageName} ${projectPath}`;
-        }
+        const buildArgs = dockerfilePath
+            ? ['build', '-t', imageName, '-f', dockerfilePath, projectPath]
+            : ['build', '-t', imageName, projectPath];
 
         try {
-            await execAsync(finalBuildCommand, { timeout: 1000 * 60 * 10 }); // 10 min
+            await execFileAsync('docker', buildArgs, { timeout: 1000 * 60 * 10 }); // 10 min
             addLog('✅ [2/6] Docker image built successfully');
         } catch (buildErr) {
             failureStage = 'build_failed';
             addLog(`❌ [2/6] Docker build failed`);
 
-            // Capture and display the full Docker build output (stdout + stderr)
-            // so the actual Next.js / npm error is visible in deployment logs
             const fullOutput = (buildErr.stdout || '') + (buildErr.stderr || '');
             if (fullOutput) {
                 fullOutput.toString().trim().split('\n').forEach(line => {
@@ -185,27 +168,27 @@ async function deploy(params, { addLog }) {
         addLog(`🐳 [3/6] Starting container (internal port ${internalPort} → external ${externalPort})...`);
         addLog(`🌐 Service is now accessible at: ${practicalUrl}`);
 
-        // === DEMO INSTRUCTION (for Option 1 subdomain + Let's Encrypt via NPM) ===
-        addLog(`📌 [DEMO] To expose on nice subdomain with your existing Let's Encrypt cert:`);
-        addLog(`   1. Open Nginx Proxy Manager UI`);
-        addLog(`   2. Create new Proxy Host:`);
-        addLog(`      Domain: demo-web.hgu.app   (or any subdomain you prepared)`);
-        addLog(`      Forward Hostname/IP: ${serverHost}`);
-        addLog(`      Forward Port: ${externalPort}`);
-        addLog(`      Enable SSL → Use your existing Let's Encrypt certificate`);
-        addLog(`   3. After creation, the service will be available at https://demo-web.hgu.app`);
-        // === End demo instruction ===
+        const envArgs = [];
+        for (const [key, value] of Object.entries(envVars || {})) {
+            if (!ENV_KEY_RE.test(key)) {
+                addLog(`⚠️ Skipping invalid environment variable name: ${key}`);
+                continue;
+            }
+            envArgs.push('-e', `${key}=${value}`);
+        }
 
-        // Build env var string
-        let envString = '';
-        Object.keys(envVars).forEach(key => {
-            envString += ` -e ${key}="${envVars[key]}"`;
-        });
+        const runArgs = [
+            'run', '-d',
+            '--name', containerName,
+            '--memory', MEM_LIMIT,
+            '--cpus', CPU_LIMIT,
+            '-p', `${externalPort}:${internalPort}`,
+            ...envArgs,
+            imageName
+        ];
 
-        const runCommand = `docker run -d --name ${containerName} -p ${externalPort}:${internalPort}${envString} ${imageName}`;
-        
         try {
-            await execAsync(runCommand);
+            await execFileAsync('docker', runArgs);
             addLog('✅ [3/6] Container started');
             containerStarted = true;
         } catch (runErr) {
@@ -214,28 +197,46 @@ async function deploy(params, { addLog }) {
             throw runErr;
         }
 
-        // Basic health check (give it 3 seconds)
+        // Health check (give it 3 seconds), and actually gate success on it.
         addLog('🩺 [4/6] Running basic health check...');
         await new Promise(r => setTimeout(r, 3000));
 
         let healthStatus = 'unknown';
         try {
-            const { stdout } = await execAsync(`docker inspect --format='{{.State.Health.Status}}' ${containerName} 2>/dev/null || echo "no-healthcheck"`);
-            healthStatus = stdout.trim();
-            addLog(`🩺 Health status: ${healthStatus}`);
+            const { stdout } = await execFileAsync('docker', ['inspect', '--format={{.State.Health.Status}}', containerName]);
+            healthStatus = stdout.trim() || 'no-healthcheck';
         } catch (e) {
-            addLog('🩺 No healthcheck defined in image (common for student projects)');
+            healthStatus = 'no-healthcheck';
+        }
+        addLog(`🩺 Health status: ${healthStatus}`);
+
+        // A container with no HEALTHCHECK defined reports "no-healthcheck" / "<no value>" — that's fine
+        // (most student projects don't define one). Only a container that is actually unhealthy or has
+        // already exited should fail the deployment.
+        let isRunning = false;
+        try {
+            const { stdout: psOut } = await execFileAsync('docker', ['ps', '--filter', `name=${containerName}`, '--format', '{{.Status}}']);
+            isRunning = psOut.includes('Up');
+        } catch (e) {
+            isRunning = false;
         }
 
-        // Call NpmProxyManagerService only after container started + health check
-        // (minimal integration per requirements)
+        if (healthStatus === 'unhealthy' || !isRunning) {
+            failureStage = 'health_check_failed';
+            addLog(`❌ [4/6] Container is not healthy (status: ${healthStatus}, running: ${isRunning})`);
+            let crashLogs = '';
+            try {
+                const { stdout } = await execFileAsync('docker', ['logs', '--tail', '30', containerName]);
+                crashLogs = stdout;
+            } catch (_) {}
+            if (crashLogs) crashLogs.trim().split('\n').forEach(l => addLog(`   ${l}`));
+            throw new Error(`Container failed health check (status: ${healthStatus})`);
+        }
+
+        // Proxy Host (only after the container is confirmed healthy/running)
         let finalUrl = url;
         try {
-            const proxyResult = await createProxyHost({
-                projectName,
-                forwardPort: externalPort,
-                addLog
-            });
+            const proxyResult = await createProxyHost({ projectName, forwardPort: externalPort, addLog });
             if (proxyResult.success && proxyResult.url) {
                 finalUrl = proxyResult.url;
             } else if (proxyResult.error) {
@@ -245,10 +246,6 @@ async function deploy(params, { addLog }) {
             addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
         }
 
-        // (URL variables already calculated earlier for logging)
-
-        // Save to DB (with owner for per-user isolation)
-        console.log(`[DB INSERT DEBUG] githubUserId=${githubUserId} (type: ${typeof githubUserId}) for project "${projectName}"`);
         await safeInsertDeployment(pool, {
             projectName,
             repository,
@@ -273,6 +270,8 @@ async function deploy(params, { addLog }) {
             addLog('   (Subdomain may not work in lab environments without DNS setup — use the port URL above.)');
         }
 
+        await cleanupProjectDir(projectPath, addLog);
+
         return {
             success: true,
             url: finalUrl,
@@ -286,13 +285,11 @@ async function deploy(params, { addLog }) {
         };
 
     } catch (error) {
-        // Clean up the container if it was started but later steps failed.
-        // This releases the port (mirrors the logic we added for Function).
         if (containerStarted && containerName) {
             try {
                 addLog('🧹 Cleaning up failed Web container (port will be released)...');
-                await execAsync(`docker stop ${containerName} || true`);
-                await execAsync(`docker rm ${containerName} || true`);
+                await execFileAsync('docker', ['stop', containerName]).catch(() => {});
+                await execFileAsync('docker', ['rm', containerName]).catch(() => {});
             } catch (cleanupErr) {
                 addLog(`⚠️ Container cleanup warning: ${cleanupErr.message}`);
             }
@@ -300,27 +297,26 @@ async function deploy(params, { addLog }) {
 
         addLog(`❌ Web deployment failed at stage: ${failureStage || 'unknown'}`);
         addLog(`Error: ${error.message}`);
-
-        // Emit a clear final failure line (same principle as APK's [Final] message)
         addLog(`❌ [Final] Deployment Failed at stage: ${failureStage || 'unknown'}. ${error.message}`);
 
-        // Still try to record the failure in DB for visibility (spec emphasizes this)
         try {
             await safeInsertDeployment(pool, {
                 projectName,
                 repository,
                 containerName: containerName || `failed-${deploymentId}`,
                 imageName: imageName || `failed-${deploymentId}`,
-                port: null,  // do not record port for failed records, so MAX(port) is not inflated by failed attempts; only successful ones reserve the port number
+                port: null,
                 url: 'Deployment failed',
                 status: 'failed',
-                serviceType: 'web'
+                serviceType: 'web',
+                githubUserId
             });
         } catch (dbErr) {
             console.error('Failed to record failure in DB:', dbErr.message);
         }
 
-        // Throw with stage information so caller can show it nicely
+        await cleanupProjectDir(projectPath, addLog);
+
         const enhancedError = new Error(error.message);
         enhancedError.failureStage = failureStage || 'unknown';
         enhancedError.stage = failureStage;

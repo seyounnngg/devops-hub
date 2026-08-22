@@ -15,8 +15,9 @@
 
 const axios = require('axios');
 
-const DEFAULT_NPM_API_URL = 'http://27.35.113.108:81/api';
-const DEFAULT_SERVER_HOST = '27.35.113.108';
+// No hardcoded infrastructure IP fallback here on purpose — NPM_API_URL and
+// SERVER_HOST must come from the environment. Silently falling back to a
+// real internal IP previously leaked infra details into the source tree.
 
 function slugifyForDomain(name) {
   if (!name) return 'app';
@@ -50,19 +51,24 @@ async function getNpmToken(npmApiUrl, email, password) {
  * Never throws for the SSL part — deployment must succeed.
  */
 async function createProxyHost({ projectName, forwardPort, addLog = console.log }) {
-  const npmApiUrl = process.env.NPM_API_URL || DEFAULT_NPM_API_URL;
+  const npmApiUrl = process.env.NPM_API_URL || '';
   const npmEmail = process.env.NPM_EMAIL || '';
   const npmPassword = process.env.NPM_PASSWORD || '';
-  const serverHost = process.env.SERVER_HOST || DEFAULT_SERVER_HOST;
+  const serverHost = process.env.SERVER_HOST || '';
 
   const autoSslEnabled = (process.env.AUTO_SSL_ENABLED || 'false').toLowerCase() === 'true';
 
   const domain = `${slugifyForDomain(projectName)}.hgu.app`;
-  const httpUrl = `http://${serverHost}:${forwardPort}`;
+  const httpUrl = serverHost ? `http://${serverHost}:${forwardPort}` : null;
   const httpsUrl = `https://${domain}`;
 
   if (!forwardPort || forwardPort < 1) {
     return { success: false, url: null, error: 'No forward port' };
+  }
+
+  if (!npmApiUrl || !serverHost) {
+    addLog('⚠️ [NPM] NPM_API_URL / SERVER_HOST not configured. Skipping Proxy Host creation.');
+    return { success: false, url: httpUrl, error: 'NPM endpoint not configured' };
   }
 
   if (!npmEmail || !npmPassword) {
@@ -106,13 +112,15 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
     addLog(`✅ [NPM] Proxy Host created (id: ${proxyHostId}).`);
 
   } catch (err) {
-    const detail = err.response?.data?.error || err.message;
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : (err.message || 'unknown error');
     addLog(`⚠️ [NPM] Proxy Host creation failed for ${domain}: ${detail}`);
     return { success: false, url: httpUrl, error: detail };
   }
 
-  // === SSL / Certificate automation (only if flag enabled) ===
-  let finalUrl = httpUrl;
+  // After successful proxy host creation, prefer the subdomain URL.
+  // http://<domain> (via the registered proxy host) by default;
+  // upgraded to https://<domain> only if AUTO_SSL succeeds.
+  let finalUrl = `http://${domain}`;
   if (autoSslEnabled) {
     try {
       addLog(`🔐 [NPM SSL] AUTO_SSL_ENABLED=true. Requesting Let's Encrypt certificate for ${domain}...`);
@@ -149,10 +157,10 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
       finalUrl = httpsUrl;
 
     } catch (sslErr) {
-      const detail = sslErr.response?.data?.error || sslErr.message || 'unknown SSL error';
+      const detail = sslErr.response?.data ? JSON.stringify(sslErr.response.data) : (sslErr.message || 'unknown SSL error');
       addLog(`⚠️ [NPM SSL] Failed to obtain or attach Let's Encrypt certificate for ${domain}: ${detail}`);
       addLog(`   Deployment succeeds with HTTP fallback URL (no SSL changes made).`);
-      // finalUrl stays as httpUrl — no exception thrown
+      // finalUrl stays as http subdomain
     }
   } else {
     addLog(`ℹ️ [NPM] AUTO_SSL_ENABLED=false (or not set). Skipping automatic Let's Encrypt certificate.`);
@@ -173,11 +181,16 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
  * Never throws; logs warning on failure so deletion can continue.
  */
 async function deleteProxyHost({ projectName, addLog = console.log }) {
-  const npmApiUrl = process.env.NPM_API_URL || DEFAULT_NPM_API_URL;
+  const npmApiUrl = process.env.NPM_API_URL || '';
   const npmEmail = process.env.NPM_EMAIL || '';
   const npmPassword = process.env.NPM_PASSWORD || '';
 
   const domain = `${slugifyForDomain(projectName)}.hgu.app`;
+
+  if (!npmApiUrl) {
+    addLog('⚠️ [NPM] NPM_API_URL not configured. Skipping Proxy Host deletion.');
+    return;
+  }
 
   if (!npmEmail || !npmPassword) {
     addLog('⚠️ [NPM] NPM_EMAIL / NPM_PASSWORD not configured. Skipping Proxy Host deletion.');

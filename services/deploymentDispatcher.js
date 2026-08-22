@@ -1,16 +1,12 @@
 const webDeployer = require('./webDeployer');
 const apkBuilder = require('./apkBuilder');
-const functionDeployer = require('./functionDeployer');
-const cronDeployer = require('./cronDeployer');
+const { safeInsertDeployment } = require('../utils/dbHelpers');
 
 /**
  * Dispatches deployment to the correct service handler based on serviceType.
- * This is the main entry point for all deployments.
- * 
- * According to Requirement Engineering doc (Team 8):
- * - Web is the main/primary service type (highest priority)
- * - APK should support building simple apps
- * - Function and Cron can be simpler/stub forms initially
+ * Web and APK are the only supported service types — Function and Cron were
+ * removed (stub-only implementations with no real isolation or resource
+ * limits; see services/README.md for history).
  */
 async function deployProject(params, { addLog, onComplete, onError }) {
     const { serviceType } = params;
@@ -29,14 +25,6 @@ async function deployProject(params, { addLog, onComplete, onError }) {
                 result = await apkBuilder.build(params, { addLog });
                 break;
 
-            case 'function':
-                result = await functionDeployer.deploy(params, { addLog });
-                break;
-
-            case 'cron':
-                result = await cronDeployer.register(params, { addLog });
-                break;
-
             default:
                 throw new Error(`Unsupported serviceType: ${serviceType}`);
         }
@@ -49,11 +37,8 @@ async function deployProject(params, { addLog, onComplete, onError }) {
         addLog(`❌ Deployment failed: ${error.message}`);
         if (onError) onError(error);
 
-        // Always ensure a failed record exists in DB so it appears on Dashboard
-        // even for early failures (missing script file, clone error, etc.)
         try {
-            const { safeInsertDeployment } = require('../utils/dbHelpers');
-            const { pool, name: projectName, repository, githubUserId, serviceType } = params;
+            const { pool, name: projectName, repository, githubUserId, serviceType: st } = params;
 
             if (pool && projectName && githubUserId) {
                 await safeInsertDeployment(pool, {
@@ -64,7 +49,7 @@ async function deployProject(params, { addLog, onComplete, onError }) {
                     port: null,
                     url: null,
                     status: 'failed',
-                    serviceType: serviceType || 'unknown',
+                    serviceType: st || 'unknown',
                     githubUserId
                 });
             }

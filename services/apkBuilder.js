@@ -1,9 +1,13 @@
-const { exec } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const path = require('path');
 const fs = require('fs');
 const { safeInsertDeployment } = require('../utils/dbHelpers');
+const { assertSafeRepository, assertSafeBranch, assertSafePathSegment } = require('../utils/validate');
+
+const BUILD_MEM_LIMIT = process.env.DEPLOY_BUILD_MEM_LIMIT || '3g';
+const BUILD_CPU_LIMIT = process.env.DEPLOY_BUILD_CPU_LIMIT || '2';
 
 /**
  * Pure Node.js recursive file search.
@@ -31,19 +35,46 @@ function findFileRecursive(startDir, targetName) {
     return null;
 }
 
+/** Streams `git clone` without a shell, so branch/repository can never be
+ *  interpreted as shell syntax. The token is passed via a credential helper
+ *  reading from an env var (GIT_TOKEN), never as part of argv or the URL. */
+function streamingCloneRepo({ githubUsername, repository, branch, githubToken, destPath, addLog }) {
+    assertSafeRepository(repository);
+    assertSafeBranch(branch);
+
+    const repoUrl = `https://github.com/${githubUsername}/${repository}.git`;
+    const credentialHelper = '!f() { echo username=x-access-token; echo password=$GIT_TOKEN; }; f';
+
+    return new Promise((resolve, reject) => {
+        const child = spawn('git', [
+            '-c', `credential.helper=${credentialHelper}`,
+            'clone',
+            '--branch', branch,
+            '--single-branch',
+            repoUrl,
+            destPath
+        ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, GIT_TOKEN: githubToken }
+        });
+
+        child.stdout.on('data', (data) => {
+            data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
+        });
+        child.stderr.on('data', (data) => {
+            data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
+        });
+
+        child.on('close', (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`Git clone failed with exit code ${code}`));
+        });
+        child.on('error', reject);
+    });
+}
+
 /**
- * APK Builder
- * 
- * Priority: Support building simple Flutter / basic Android apps.
- * 
- * Current status: STUB with real build path prepared.
- * 
- * Strategy for simple apps:
- * - Use a Docker image that contains Android SDK + Flutter (e.g. cirrusci/flutter or custom)
- * - Run flutter build apk or ./gradlew assembleRelease
- * - Store the resulting .apk and return a download link
- * 
- * For the first working version we will implement a basic working version for simple projects.
+ * APK Builder — supports Flutter and basic Android (Gradle) projects.
  */
 async function build(params, { addLog }) {
     const {
@@ -62,83 +93,39 @@ async function build(params, { addLog }) {
     const deploymentId = Date.now();
     const projectPath = `/tmp/apk-builds/${projectName}-${deploymentId}`;
 
-    // Ensure the build directory exists (important when using Docker volume mounts from host)
     try {
         fs.mkdirSync(path.dirname(projectPath), { recursive: true });
     } catch (e) {
         // ignore if already exists
     }
 
-    const cloneCommand = `git clone --branch ${branch} https://${githubToken}@github.com/${githubUsername}/${repository}.git ${projectPath}`;
-
-    // Debug: show the clone command (token redacted for safety)
-    const redactedCommand = cloneCommand.replace(githubToken, '***TOKEN***');
-    addLog(`DEBUG clone command: ${redactedCommand}`);
-
     try {
-        // Use spawn for real-time logging of clone output (stdout + stderr)
-        addLog('📦 Cloning repository...');
+        await streamingCloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath, addLog });
 
-        await new Promise((resolve, reject) => {
-            const { spawn } = require('child_process');
-            const child = spawn('/bin/sh', ['-c', cloneCommand], {
-                stdio: ['ignore', 'pipe', 'pipe']
-            });
+        try {
+            const contents = fs.readdirSync(projectPath);
+            addLog(`DEBUG: Directory contents after clone: ${contents.length > 0 ? contents.join(', ') : '(empty)'}`);
+        } catch (e) {
+            addLog('DEBUG: Could not read cloned directory');
+        }
 
-            child.stdout.on('data', (data) => {
-                const lines = data.toString().trim().split('\n');
-                lines.forEach(line => {
-                    if (line.trim()) addLog(line.trim());
-                });
-            });
+        const pubspecFoundPath = findFileRecursive(projectPath, 'pubspec.yaml');
 
-            child.stderr.on('data', (data) => {
-                const lines = data.toString().trim().split('\n');
-                lines.forEach(line => {
-                    if (line.trim()) addLog(line.trim());
-                });
-            });
+        if (!pubspecFoundPath) {
+            addLog('⚠️ Git clone reported success, but no pubspec.yaml was found anywhere in the cloned directory.');
+            addLog('This is a very strong sign that your GitHub token does not have permission to clone this private repository.');
+            addLog('→ Please go to GitHub → Settings → Developer settings → Personal access tokens');
+            addLog('→ Make sure it is a Classic token with the "repo" scope fully checked.');
+            addLog('❌ [Final] Deployment Failed: pubspec.yaml 파일을 찾을 수 없습니다.');
+            addLog('   현재 APK Build는 Flutter 프로젝트만 지원합니다.');
+            throw new Error('No Flutter project found (pubspec.yaml missing). Check if this is a valid Flutter project and token scopes.');
+        }
 
-            child.on('close', (code) => {
-                if (code === 0) {
-                    // List directory contents for debugging
-                    try {
-                        const contents = fs.readdirSync(projectPath);
-                        addLog(`DEBUG: Directory contents after clone: ${contents.length > 0 ? contents.join(', ') : '(empty)'}`);
-                    } catch (e) {
-                        addLog('DEBUG: Could not read cloned directory');
-                    }
-
-                    // Robust validation using pure Node.js (no shell `find` dependency)
-                    const pubspecFoundPath = findFileRecursive(projectPath, 'pubspec.yaml');
-
-                    if (!pubspecFoundPath) {
-                        addLog('⚠️ Git clone reported success, but no pubspec.yaml was found anywhere in the cloned directory.');
-                        addLog('This is a very strong sign that your GitHub token does not have permission to clone this private repository.');
-                        addLog('→ Please go to GitHub → Settings → Developer settings → Personal access tokens');
-                        addLog('→ Make sure it is a Classic token with the "repo" scope fully checked.');
-                        addLog('❌ [Final] Deployment Failed: pubspec.yaml 파일을 찾을 수 없습니다.');
-                        addLog('   현재 APK Build는 Flutter 프로젝트만 지원합니다.');
-                        reject(new Error('No Flutter project found (pubspec.yaml missing). Check if this is a valid Flutter project and token scopes.'));
-                        return;
-                    }
-
-                    addLog('✅ Repository cloned successfully with project files');
-                    resolve();
-                } else {
-                    reject(new Error(`Git clone failed with exit code ${code}`));
-                }
-            });
-
-            child.on('error', (err) => {
-                reject(err);
-            });
-        });
+        addLog('✅ Repository cloned successfully with project files');
 
         // === Improved Flutter / Android project root detection ===
         addLog('🔍 Detecting project root...');
 
-        // Find project files using pure Node.js recursive search (reliable, no shell dependency)
         const pubspecPath = findFileRecursive(projectPath, 'pubspec.yaml');
         const gradlePath = findFileRecursive(projectPath, 'build.gradle');
 
@@ -146,57 +133,41 @@ async function build(params, { addLog }) {
         let artifactPath = '';
         let flutterProjectRoot = null;
 
-        // Use a modern, actively maintained Flutter image (the old cirrusci/flutter is dead and ships ancient Dart 2.x)
         const useFlutterImage = 'ghcr.io/cirruslabs/flutter:stable';
 
         if (pubspecPath) {
             flutterProjectRoot = path.dirname(pubspecPath);
+            // Defense in depth: the build command below still runs through `sh -c` for the Flutter
+            // toolchain itself, so make sure nothing shell-meaningful made it into this path (it is
+            // derived from directory names inside the user's own cloned repo).
+            assertSafePathSegment(flutterProjectRoot, 'project path');
             addLog(`✅ Flutter project root detected: ${flutterProjectRoot}`);
 
-            // === Explicit image pull phase for better visibility ===
             addLog(`🐳 Ensuring Flutter build image is ready (${useFlutterImage})...`);
 
-            const pullCommand = `docker pull ${useFlutterImage}`;
-            await new Promise((resolve, reject) => {
-                const { spawn } = require('child_process');
-                const child = spawn('/bin/sh', ['-c', pullCommand], {
-                    stdio: ['ignore', 'pipe', 'pipe']
-                });
+            await new Promise((resolve) => {
+                const child = spawn('docker', ['pull', useFlutterImage], { stdio: ['ignore', 'pipe', 'pipe'] });
 
                 child.stdout.on('data', (data) => {
-                    const lines = data.toString().trim().split('\n');
-                    lines.forEach(line => {
-                        if (line.trim()) addLog(`   [pull] ${line.trim()}`);
-                    });
+                    data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(`   [pull] ${line.trim()}`); });
                 });
                 child.stderr.on('data', (data) => {
-                    const lines = data.toString().trim().split('\n');
-                    lines.forEach(line => {
-                        if (line.trim()) addLog(`   [pull] ${line.trim()}`);
-                    });
+                    data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(`   [pull] ${line.trim()}`); });
                 });
 
                 child.on('close', (code) => {
-                    if (code === 0) {
-                        addLog(`✅ Flutter image is ready`);
-                        resolve();
-                    } else {
-                        addLog(`⚠️ docker pull exited with code ${code} (may still work if image is cached)`);
-                        resolve(); // Continue anyway - image might already be present
-                    }
+                    if (code === 0) addLog(`✅ Flutter image is ready`);
+                    else addLog(`⚠️ docker pull exited with code ${code} (may still work if image is cached)`);
+                    resolve();
                 });
-
                 child.on('error', (err) => {
                     addLog(`⚠️ Pull error: ${err.message} (continuing with cached image if available)`);
                     resolve();
                 });
             });
 
-            // B1 Optimization: Faster subsequent builds (v2)
-            // - Additional Flutter tool cache volume
-            // - Gradle parallel + no-daemon for CI speed
-            // - Better sdkmanager install syntax + analytics disabled
             buildCommand = `docker run --rm \
+              --memory ${BUILD_MEM_LIMIT} --cpus ${BUILD_CPU_LIMIT} \
               -v "${flutterProjectRoot}:/app" \
               -v flutter-gradle-cache:/root/.gradle \
               -v flutter-pub-cache:/root/.pub-cache \
@@ -221,9 +192,10 @@ EOL
 
         } else if (gradlePath) {
             const androidProjectRoot = path.dirname(gradlePath);
+            assertSafePathSegment(androidProjectRoot, 'project path');
             addLog(`✅ Android project root detected: ${androidProjectRoot}`);
 
-            buildCommand = `docker run --rm -v "${androidProjectRoot}:/app" -w /app openjdk:17-jdk sh -c "./gradlew assembleRelease"`;
+            buildCommand = `docker run --rm --memory ${BUILD_MEM_LIMIT} --cpus ${BUILD_CPU_LIMIT} -v "${androidProjectRoot}:/app" -w /app openjdk:17-jdk sh -c "./gradlew assembleRelease"`;
             artifactPath = `${androidProjectRoot}/app/build/outputs/apk/release/app-release.apk`;
 
         } else {
@@ -232,27 +204,16 @@ EOL
             throw new Error('Not a valid Flutter or Android project.');
         }
 
-        addLog('🔨 Starting APK build (typically 5-10 minutes with cache)...');
+        addLog('🔨 Starting APK build (typically 1-5 minutes with cache)...');
 
-        // Stream real build logs using /bin/sh (more portable in Alpine containers)
         await new Promise((resolve, reject) => {
-            const { spawn } = require('child_process');
-            const child = spawn('/bin/sh', ['-c', buildCommand], {
-                stdio: ['ignore', 'pipe', 'pipe']
-            });
+            const child = spawn('/bin/sh', ['-c', buildCommand], { stdio: ['ignore', 'pipe', 'pipe'] });
 
             child.stdout.on('data', (data) => {
-                const lines = data.toString().trim().split('\n');
-                lines.forEach(line => {
-                    if (line.trim()) addLog(line.trim());
-                });
+                data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
             });
-
             child.stderr.on('data', (data) => {
-                const lines = data.toString().trim().split('\n');
-                lines.forEach(line => {
-                    if (line.trim()) addLog(line.trim());
-                });
+                data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
             });
 
             child.on('close', (code) => {
@@ -263,32 +224,30 @@ EOL
                     reject(new Error(`APK build exited with code ${code}`));
                 }
             });
-
-            child.on('error', (err) => {
-                reject(err);
-            });
+            child.on('error', reject);
         });
 
         let downloadUrl = null;
         try {
-            await execAsync(`test -f "${artifactPath}"`);
+            if (!fs.existsSync(artifactPath)) throw new Error('artifact not found');
 
-            await execAsync('mkdir -p /tmp/apks');
+            await fs.promises.mkdir('/tmp/apks', { recursive: true });
 
             const fileName = `${projectName}-${deploymentId}.apk`;
             const finalApkPath = `/tmp/apks/${fileName}`;
 
-            await execAsync(`cp "${artifactPath}" "${finalApkPath}"`);
+            await fs.promises.copyFile(artifactPath, finalApkPath);
 
+            // Metadata only — actual downloads go through the authenticated
+            // GET /deployments/:id/apk route (server.js), not this path directly.
             downloadUrl = `/apks/${fileName}`;
-            addLog(`✅ APK ready for download`);
+            addLog(`✅ APK build succeeded — download it from the deployment detail page.`);
         } catch (err) {
             addLog('❌ APK artifact not found after build.');
             console.error('APK copy error:', err);
             downloadUrl = null;
         }
 
-        // Record in DB (with owner for per-user isolation)
         await safeInsertDeployment(pool, {
             projectName,
             repository,
@@ -306,14 +265,20 @@ EOL
             success: !!downloadUrl,
             serviceType: 'apk',
             downloadUrl,
-            message: downloadUrl 
-                ? 'APK build succeeded' 
+            message: downloadUrl
+                ? 'APK build succeeded'
                 : 'APK build failed. Check logs for details.'
         };
 
     } catch (error) {
         addLog(`❌ APK build process error: ${error.message}`);
         throw error;
+    } finally {
+        try {
+            await fs.promises.rm(projectPath, { recursive: true, force: true });
+        } catch (e) {
+            addLog(`⚠️ Could not clean up build directory: ${e.message}`);
+        }
     }
 }
 
