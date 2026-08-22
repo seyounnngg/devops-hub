@@ -286,6 +286,17 @@ function DeploymentDetail() {
                                         {redeploying ? 'Redeploying...' : '↻ Redeploy'}
                                     </button>
                                 )}
+                                {deployment.service_type === 'web' && (
+                                    deployment.github_webhook_id ? (
+                                        <span className="text-xs px-3 py-1 bg-emerald-500/10 text-emerald-400 rounded-full" title={`Pushes to ${deployment.branch} redeploy this automatically`}>
+                                            🔗 Auto-redeploy on
+                                        </span>
+                                    ) : deployment.branch && (
+                                        <span className="text-xs px-3 py-1 bg-zinc-800 text-zinc-500 rounded-full" title="Webhook registration failed or hasn't run — use the Redeploy button instead">
+                                            Auto-redeploy off
+                                        </span>
+                                    )
+                                )}
                             </div>
                             {redeployMessage && <p className="text-xs text-red-400 mt-2">{redeployMessage}</p>}
                         </div>
