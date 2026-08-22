@@ -88,6 +88,14 @@ export function deleteDeployment(id) {
   return fetchJson(`/deployments/${id}`, { method: 'DELETE' });
 }
 
+export function updateEnvVars(id, envVars) {
+  return fetchJson(`/deployments/${id}/env`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ envVars }),
+  });
+}
+
 export function deleteAllMyData() {
   return fetchJson('/me', { method: 'DELETE' });
 }

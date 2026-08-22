@@ -16,6 +16,9 @@ function CreateProject() {
     const [repositories, setRepositories] = useState([]);
     const [repoLoadError, setRepoLoadError] = useState(null);
 
+    // Web-only: list of { key, value } rows, converted to an object at submit time
+    const [envVarRows, setEnvVarRows] = useState([]);
+
     // Error shown only after user clicks Next with invalid input
     const [nameError, setNameError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,12 +56,18 @@ function CreateProject() {
         // 2. Navigate to Progress page immediately (user wants to see live logs right away)
         navigate('/progress');
 
+        const envVars = envVarRows.reduce((acc, row) => {
+            if (row.key.trim()) acc[row.key.trim()] = row.value;
+            return acc;
+        }, {});
+
         // 3. Fire the actual deployment request in the background (only once)
         createProject({
             name: projectName,
             repository,
             branch,
             serviceType,
+            ...(serviceType === 'web' && Object.keys(envVars).length > 0 ? { envVars } : {}),
         }).catch((err) => {
             console.error('Deployment request failed:', err);
             // The Progress page keeps polling logs and will show the failure there.
@@ -242,6 +251,57 @@ function CreateProject() {
                                 );
                             })}
                         </div>
+
+                        {serviceType === 'web' && (
+                            <div className="mb-8">
+                                <div className="flex items-center justify-between mb-2">
+                                    <label className="text-xs font-semibold tracking-[1px] text-zinc-400 uppercase">
+                                        Environment Variables <span className="normal-case text-zinc-500">(optional)</span>
+                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={() => setEnvVarRows(rows => [...rows, { key: '', value: '' }])}
+                                        className="text-xs px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition"
+                                    >
+                                        + Add variable
+                                    </button>
+                                </div>
+                                {envVarRows.length === 0 ? (
+                                    <p className="text-xs text-zinc-500">
+                                        None set. Your app will run with just the standard container environment.
+                                    </p>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {envVarRows.map((row, i) => (
+                                            <div key={i} className="flex gap-2">
+                                                <input
+                                                    type="text"
+                                                    placeholder="KEY"
+                                                    value={row.key}
+                                                    onChange={(e) => setEnvVarRows(rows => rows.map((r, ri) => ri === i ? { ...r, key: e.target.value } : r))}
+                                                    className="w-2/5 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    placeholder="value"
+                                                    value={row.value}
+                                                    onChange={(e) => setEnvVarRows(rows => rows.map((r, ri) => ri === i ? { ...r, value: e.target.value } : r))}
+                                                    className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setEnvVarRows(rows => rows.filter((_, ri) => ri !== i))}
+                                                    className="px-3 text-zinc-500 hover:text-red-400 transition"
+                                                    aria-label="Remove variable"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="text-xs font-semibold tracking-[1px] text-zinc-400 mb-1.5 uppercase">Summary</div>
                         <div className="text-sm text-zinc-300 space-y-1">

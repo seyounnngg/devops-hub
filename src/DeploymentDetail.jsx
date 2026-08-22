@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl } from "./api";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars } from "./api";
 
 function DeploymentDetail() {
 
@@ -10,6 +10,11 @@ function DeploymentDetail() {
 
     const [logs, setLogs] = useState([]);
     const [deployment, setDeployment] = useState(null);
+
+    const [envVarRows, setEnvVarRows] = useState([]);
+    const [envVarsLoadedFor, setEnvVarsLoadedFor] = useState(null);
+    const [savingEnvVars, setSavingEnvVars] = useState(false);
+    const [envSaveMessage, setEnvSaveMessage] = useState('');
 
     const projectName = localStorage.getItem("currentProject");
 
@@ -60,6 +65,38 @@ function DeploymentDetail() {
             bottomRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
         }
     }, [logs.length]);
+
+    // Load saved env vars into the editable rows once per deployment id — not on every
+    // poll tick, so it doesn't overwrite whatever the user is currently typing.
+    useEffect(() => {
+        if (!deployment || deployment.id === envVarsLoadedFor) return;
+        let parsed;
+        try {
+            parsed = deployment.env_vars ? JSON.parse(deployment.env_vars) : {};
+        } catch {
+            parsed = {};
+        }
+        setEnvVarRows(Object.entries(parsed).map(([key, value]) => ({ key, value })));
+        setEnvVarsLoadedFor(deployment.id);
+    }, [deployment, envVarsLoadedFor]);
+
+    async function handleSaveEnvVars() {
+        if (!deployment?.id) return;
+        setSavingEnvVars(true);
+        setEnvSaveMessage('');
+        try {
+            const envVars = envVarRows.reduce((acc, row) => {
+                if (row.key.trim()) acc[row.key.trim()] = row.value;
+                return acc;
+            }, {});
+            await updateEnvVars(deployment.id, Object.keys(envVars).length > 0 ? envVars : null);
+            setEnvSaveMessage('Saved. Redeploy this project to apply the new values.');
+        } catch {
+            setEnvSaveMessage('Failed to save.');
+        } finally {
+            setSavingEnvVars(false);
+        }
+    }
 
     if (!projectName) {
         return (
@@ -196,6 +233,67 @@ function DeploymentDetail() {
                                 </a>
                             </div>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {/* Environment Variables (Web only) */}
+            {deployment && deployment.service_type !== 'apk' && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+                    <div className="flex items-center justify-between mb-1">
+                        <div className="font-semibold tracking-tight">Environment Variables</div>
+                        <button
+                            type="button"
+                            onClick={() => setEnvVarRows(rows => [...rows, { key: '', value: '' }])}
+                            className="text-xs px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition"
+                        >
+                            + Add variable
+                        </button>
+                    </div>
+                    <p className="text-xs text-zinc-500 mb-4">Changes apply on the next redeploy of this project, not to the currently running container.</p>
+
+                    {envVarRows.length === 0 ? (
+                        <p className="text-xs text-zinc-500">None set.</p>
+                    ) : (
+                        <div className="space-y-2 mb-4">
+                            {envVarRows.map((row, i) => (
+                                <div key={i} className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        placeholder="KEY"
+                                        value={row.key}
+                                        onChange={(e) => setEnvVarRows(rows => rows.map((r, ri) => ri === i ? { ...r, key: e.target.value } : r))}
+                                        className="w-2/5 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="value"
+                                        value={row.value}
+                                        onChange={(e) => setEnvVarRows(rows => rows.map((r, ri) => ri === i ? { ...r, value: e.target.value } : r))}
+                                        className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setEnvVarRows(rows => rows.filter((_, ri) => ri !== i))}
+                                        className="px-3 text-zinc-500 hover:text-red-400 transition"
+                                        aria-label="Remove variable"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={handleSaveEnvVars}
+                            disabled={savingEnvVars}
+                            className="px-5 py-2 text-sm font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition disabled:opacity-60"
+                        >
+                            {savingEnvVars ? 'Saving...' : 'Save'}
+                        </button>
+                        {envSaveMessage && <span className="text-xs text-zinc-400">{envSaveMessage}</span>}
                     </div>
                 </div>
             )}
