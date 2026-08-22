@@ -215,7 +215,7 @@ function CreateProject() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
                             {[
-                                { type: 'web', label: 'Web Service', desc: 'React, Next.js, Express, etc.', accent: 'sky' },
+                                { type: 'web', label: 'Web Service', desc: 'React, Next.js, Node, Python, Java, Go — or bring your own Dockerfile', accent: 'sky' },
                                 { type: 'apk', label: 'APK Build', desc: 'Flutter or basic Android (Gradle)', accent: 'violet' },
                             ].map((item) => {
                                 const isActive = serviceType === item.type;

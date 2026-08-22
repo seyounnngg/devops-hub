@@ -17,6 +17,12 @@ async function handleResponse(res) {
     if (onSessionInvalidated) onSessionInvalidated();
     throw new Error('Unauthorized');
   }
+  if (!res.ok) {
+    // Surface a real error instead of letting callers treat an
+    // { error: "..." } body as if it were the expected array/object shape.
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.message || body?.error || `Request failed (${res.status})`);
+  }
   return res;
 }
 
