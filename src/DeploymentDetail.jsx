@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl } from "./api";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl } from "./api";
 
 function DeploymentDetail() {
 
@@ -162,14 +162,27 @@ function DeploymentDetail() {
                         </div>
 
                         {deployment.apk_url ? (
-                            <a
-                                href={apkDownloadUrl(deployment.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center justify-center px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-2xl transition"
-                            >
-                                Download APK
-                            </a>
+                            <div className="flex flex-wrap gap-2">
+                                <a
+                                    href={apkDownloadUrl(deployment.id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center justify-center px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-2xl transition"
+                                >
+                                    Download APK
+                                </a>
+                                {deployment.aab_url && (
+                                    <a
+                                        href={aabDownloadUrl(deployment.id)}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center justify-center px-6 py-2.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold rounded-2xl transition"
+                                        title="Android App Bundle — for Play Store upload"
+                                    >
+                                        Download AAB
+                                    </a>
+                                )}
+                            </div>
                         ) : serviceUrl && !isBuilding && (
                             <div className="text-left md:text-right">
                                 <div className="text-xs text-zinc-500 mb-1">Service URL</div>

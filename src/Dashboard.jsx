@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getDeployments, stopDeployment, restartDeployment, deleteDeployment, apkDownloadUrl } from "./api";
+import { getDeployments, stopDeployment, restartDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl } from "./api";
 
 function Dashboard() {
     const navigate = useNavigate();
@@ -329,7 +329,7 @@ function Dashboard() {
                                         View Logs
                                     </button>
 
-                                    {/* APK Download */}
+                                    {/* APK / AAB Download */}
                                     {t === 'apk' && deployment.apk_url && (
                                         <a
                                             href={apkDownloadUrl(deployment.id)}
@@ -339,6 +339,17 @@ function Dashboard() {
                                             className="flex-1 min-w-[92px] py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white text-center rounded-xl transition"
                                         >
                                             Download APK
+                                        </a>
+                                    )}
+                                    {t === 'apk' && deployment.aab_url && (
+                                        <a
+                                            href={aabDownloadUrl(deployment.id)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="flex-1 min-w-[92px] py-2 text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white text-center rounded-xl transition"
+                                        >
+                                            Download AAB
                                         </a>
                                     )}
 

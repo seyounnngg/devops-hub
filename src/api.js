@@ -104,6 +104,10 @@ export function apkDownloadUrl(deploymentId) {
   return `${API_BASE}/deployments/${deploymentId}/apk`;
 }
 
+export function aabDownloadUrl(deploymentId) {
+  return `${API_BASE}/deployments/${deploymentId}/aab`;
+}
+
 export function githubLoginUrl(force = false) {
   return `${API_BASE}/auth/github${force ? '?force=true' : ''}`;
 }
