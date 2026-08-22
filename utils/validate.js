@@ -46,9 +46,22 @@ function assertSafePathSegment(segment, label = 'path') {
     return segment;
 }
 
+// Hostname labels: 1-63 chars, alphanumeric + hyphen, not starting/ending with a hyphen.
+const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+
+function assertSafeDomain(domain) {
+    if (typeof domain !== 'string' || !DOMAIN_RE.test(domain)) {
+        const err = new Error('Invalid domain. Enter a plain hostname like myapp.com (no protocol or path).');
+        err.status = 400;
+        throw err;
+    }
+    return domain.toLowerCase();
+}
+
 module.exports = {
     assertSafeProjectName,
     assertSafeRepository,
     assertSafeBranch,
-    assertSafePathSegment
+    assertSafePathSegment,
+    assertSafeDomain
 };

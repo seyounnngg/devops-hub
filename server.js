@@ -15,7 +15,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 
-const { assertSafeProjectName, assertSafeRepository, assertSafeBranch } = require('./utils/validate');
+const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSafeDomain } = require('./utils/validate');
 
 // Ensure directories that will be used for builds and APK artifacts
 const APK_DIR = '/tmp/apks';
@@ -703,6 +703,82 @@ app.put('/deployments/:id/env', async (req, res) => {
         }
         console.error(error);
         res.status(500).json({ error: 'Failed to update environment variables' });
+    }
+});
+
+app.post('/deployments/:id/domain', async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
+        const customDomain = assertSafeDomain(req.body.customDomain);
+
+        const [rows] = await pool.execute(
+            'SELECT * FROM deployments WHERE id = ? AND github_user_id = ?',
+            [req.params.id, user.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Deployment not found or access denied' });
+        }
+        const deployment = rows[0];
+        if (deployment.service_type !== 'web' || !deployment.port) {
+            return res.status(400).json({ error: 'Custom domains are only supported for running Web deployments' });
+        }
+
+        const { addCustomDomain } = require('./services/NpmProxyManager');
+        const result = await addCustomDomain({
+            projectName: deployment.project_name,
+            customDomain,
+            forwardPort: deployment.port,
+            addLog: (m) => console.log(m)
+        });
+
+        if (!result.success) {
+            return res.status(502).json({ error: result.error || 'Failed to attach domain' });
+        }
+
+        await pool.execute('UPDATE deployments SET custom_domain = ? WHERE id = ?', [customDomain, req.params.id]);
+        res.json({ success: true, url: result.url });
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (error.status === 400) {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Failed to attach custom domain' });
+    }
+});
+
+app.delete('/deployments/:id/domain', async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
+        const [rows] = await pool.execute(
+            'SELECT * FROM deployments WHERE id = ? AND github_user_id = ?',
+            [req.params.id, user.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Deployment not found or access denied' });
+        }
+        const deployment = rows[0];
+        if (!deployment.custom_domain) {
+            return res.json({ success: true });
+        }
+
+        const { removeCustomDomain } = require('./services/NpmProxyManager');
+        await removeCustomDomain({
+            projectName: deployment.project_name,
+            customDomain: deployment.custom_domain,
+            addLog: (m) => console.log(m)
+        });
+
+        await pool.execute('UPDATE deployments SET custom_domain = NULL WHERE id = ?', [req.params.id]);
+        res.json({ success: true });
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Failed to remove custom domain' });
     }
 });
 

@@ -231,8 +231,143 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
   }
 }
 
+/**
+ * Add a custom domain to a project's existing Proxy Host (found by its
+ * default <slug>.hgu.app domain). If AUTO_SSL_ENABLED, requests a single
+ * certificate covering both the default and custom domain together (a
+ * separate cert covering only the custom domain would replace the proxy
+ * host's certificate and break TLS on the default hgu.app subdomain).
+ *
+ * Returns { success, url?, error? }. Never throws.
+ */
+async function addCustomDomain({ projectName, customDomain, forwardPort, addLog = console.log }) {
+  const npmApiUrl = process.env.NPM_API_URL || '';
+  const npmEmail = process.env.NPM_EMAIL || '';
+  const npmPassword = process.env.NPM_PASSWORD || '';
+  const autoSslEnabled = (process.env.AUTO_SSL_ENABLED || 'false').toLowerCase() === 'true';
+
+  const defaultDomain = `${slugifyForDomain(projectName)}.hgu.app`;
+
+  if (!npmApiUrl || !npmEmail || !npmPassword) {
+    return { success: false, error: 'NPM not configured on this server' };
+  }
+
+  let token;
+  try {
+    token = await getNpmToken(npmApiUrl, npmEmail, npmPassword);
+  } catch (e) {
+    return { success: false, error: `NPM auth failed: ${e.message}` };
+  }
+
+  let match;
+  try {
+    const listResp = await axios.get(`${npmApiUrl}/nginx/proxy-hosts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+    match = (listResp.data || []).find(p => p && p.domain_names && p.domain_names.includes(defaultDomain));
+  } catch (e) {
+    return { success: false, error: `Could not look up existing Proxy Host: ${e.message}` };
+  }
+
+  if (!match) {
+    return { success: false, error: `No existing Proxy Host found for ${defaultDomain}. Deploy the project first.` };
+  }
+
+  const updatedDomains = Array.from(new Set([...(match.domain_names || []), customDomain]));
+
+  try {
+    await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, { domain_names: updatedDomains }, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 30000
+    });
+    addLog(`✅ [NPM] ${customDomain} added to the Proxy Host for ${defaultDomain}.`);
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : (err.message || 'unknown error');
+    return { success: false, error: detail };
+  }
+
+  let url = `http://${customDomain}`;
+  if (autoSslEnabled) {
+    try {
+      addLog(`🔐 [NPM SSL] Requesting a certificate covering ${updatedDomains.join(', ')}...`);
+      const certResp = await axios.post(`${npmApiUrl}/nginx/certificates`, {
+        provider: 'letsencrypt',
+        domain_names: updatedDomains,
+        meta: { dns_challenge: false }
+      }, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeout: 900000
+      });
+
+      await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, {
+        domain_names: updatedDomains,
+        certificate_id: certResp.data.id,
+        ssl_forced: true,
+        http2_support: true
+      }, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeout: 30000
+      });
+
+      addLog(`✅ [NPM SSL] Certificate issued and attached for ${customDomain}.`);
+      url = `https://${customDomain}`;
+    } catch (sslErr) {
+      const detail = sslErr.response?.data ? JSON.stringify(sslErr.response.data) : (sslErr.message || 'unknown SSL error');
+      addLog(`⚠️ [NPM SSL] Failed to obtain/attach certificate for ${customDomain}: ${detail}`);
+      addLog('   Domain is routed over HTTP only. Make sure its DNS points to this server, then try again.');
+    }
+  }
+
+  return { success: true, url };
+}
+
+/**
+ * Remove a custom domain from a project's Proxy Host, leaving the default
+ * <slug>.hgu.app domain untouched. Never throws.
+ */
+async function removeCustomDomain({ projectName, customDomain, addLog = console.log }) {
+  const npmApiUrl = process.env.NPM_API_URL || '';
+  const npmEmail = process.env.NPM_EMAIL || '';
+  const npmPassword = process.env.NPM_PASSWORD || '';
+
+  const defaultDomain = `${slugifyForDomain(projectName)}.hgu.app`;
+
+  if (!npmApiUrl || !npmEmail || !npmPassword) {
+    addLog('⚠️ [NPM] NPM not configured. Skipping custom domain removal on the proxy side.');
+    return { success: false };
+  }
+
+  try {
+    const token = await getNpmToken(npmApiUrl, npmEmail, npmPassword);
+    const listResp = await axios.get(`${npmApiUrl}/nginx/proxy-hosts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+    const match = (listResp.data || []).find(p => p && p.domain_names && p.domain_names.includes(defaultDomain));
+    if (!match) {
+      addLog(`ℹ️ [NPM] No Proxy Host found for ${defaultDomain}.`);
+      return { success: true };
+    }
+
+    const remainingDomains = (match.domain_names || []).filter(d => d !== customDomain);
+    await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, { domain_names: remainingDomains }, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 30000
+    });
+    addLog(`✅ [NPM] ${customDomain} removed from the Proxy Host for ${defaultDomain}.`);
+    return { success: true };
+  } catch (err) {
+    const detail = err.response?.data?.error || err.message || 'unknown error';
+    addLog(`⚠️ [NPM] Failed to remove ${customDomain}: ${detail}`);
+    return { success: false };
+  }
+}
+
 module.exports = {
   createProxyHost,
   deleteProxyHost,
+  addCustomDomain,
+  removeCustomDomain,
   slugifyForDomain
 };

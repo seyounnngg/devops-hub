@@ -4,7 +4,8 @@ const {
     assertSafeProjectName,
     assertSafeRepository,
     assertSafeBranch,
-    assertSafePathSegment
+    assertSafePathSegment,
+    assertSafeDomain
 } = require('../utils/validate');
 
 test('assertSafeProjectName accepts normal names', () => {
@@ -38,4 +39,16 @@ test('assertSafeRepository rejects path traversal / injection', () => {
 test('assertSafePathSegment rejects shell metacharacters in cloned paths', () => {
     assert.doesNotThrow(() => assertSafePathSegment('/tmp/apk-builds/my-app-123/android'));
     assert.throws(() => assertSafePathSegment('/tmp/apk-builds/my-app"; rm -rf ~ #/android'));
+});
+
+test('assertSafeDomain accepts plain hostnames', () => {
+    assert.doesNotThrow(() => assertSafeDomain('myapp.com'));
+    assert.doesNotThrow(() => assertSafeDomain('sub.domain.example.co.kr'));
+});
+
+test('assertSafeDomain rejects protocol, paths, and injection attempts', () => {
+    assert.throws(() => assertSafeDomain('https://myapp.com'));
+    assert.throws(() => assertSafeDomain('myapp.com/path'));
+    assert.throws(() => assertSafeDomain('myapp.com; rm -rf /'));
+    assert.throws(() => assertSafeDomain(''));
 });
