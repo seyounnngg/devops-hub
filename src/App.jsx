@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import {
     BrowserRouter,
     Routes,
@@ -10,7 +10,7 @@ import Dashboard from "./Dashboard";
 import CreateProject from "./CreateProject";
 import Progress from "./Progress";
 import DeploymentDetail from "./DeploymentDetail";
-import { setSessionInvalidatedHandler } from "./api";
+import { setSessionInvalidatedHandler, getMe, logout, githubLoginUrl, githubLogoutUrl } from "./api";
 
 // New pages for the updated sidebar
 import Activity from "./Activity";
@@ -20,7 +20,7 @@ import Settings from "./Settings";
 // Simple professional login landing (enforces login-first for Plan B per-user isolation)
 function LoginLanding() {
     const handleGitHubLogin = () => {
-        window.location.href = 'https://api.hgu.app/auth/github';
+        window.location.href = githubLoginUrl();
     };
 
     return (
@@ -40,7 +40,7 @@ function LoginLanding() {
                     Deploy your projects.<br />Privately.
                 </h1>
                 <p className="text-zinc-400 mb-8">
-                    Sign in with GitHub to manage your own Web, APK, Function, and Cron deployments.
+                    Sign in with GitHub to manage your own Web and APK deployments.
                     Your data is isolated — only you can see and control what you deploy.
                 </p>
 
@@ -66,49 +66,23 @@ function AppContent() {
     const [showSessionExpiredModal, setShowSessionExpiredModal] = useState(false);
 
     useEffect(() => {
-        // Capture JWT from OAuth callback (backend redirects with ?token=xxx)
-        const params = new URLSearchParams(window.location.search);
-        const urlToken = params.get('token');
+        // Session lives in an httpOnly cookie now — ask the backend whether we're logged in
+        // instead of reading anything from the URL or localStorage.
+        getMe()
+            .then(() => setIsAuthed(true))
+            .catch(() => setIsAuthed(false))
+            .finally(() => setChecking(false));
 
-        if (urlToken) {
-            localStorage.setItem('token', urlToken);
-            window.history.replaceState({}, document.title, window.location.pathname);
-        }
-
-        const token = localStorage.getItem('token');
-        setIsAuthed(!!token);
-        setChecking(false);
-
-        // Register handler for when session is killed from another device
         setSessionInvalidatedHandler(() => {
-            localStorage.removeItem('token');
             setIsAuthed(false);
             setShowSessionExpiredModal(true);
         });
     }, []);
 
     const handleLogout = async () => {
-        const token = localStorage.getItem('token');
-
-        // Call backend to invalidate ALL sessions for this user (cross-device logout)
-        if (token) {
-            try {
-                await fetch('https://api.hgu.app/auth/logout', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-            } catch (e) {
-                // Ignore network errors — we still want to log out locally
-            }
-        }
-
-        localStorage.removeItem('token');
+        await logout();
         setIsAuthed(false);
-
-        // Redirect to GitHub logout page (clears GitHub browser session) then back to login
-        window.location.href = 'https://api.hgu.app/auth/logout';
+        window.location.href = githubLogoutUrl();
     };
 
     if (checking) {

@@ -1,10 +1,11 @@
-const API_BASE = "https://api.hgu.app";
+const API_BASE = import.meta.env.VITE_API_BASE || "https://api.hgu.app";
 
-function getToken() {
-  return localStorage.getItem("token");
-}
+export { API_BASE };
 
-// Global handler for when session is revoked from another device
+// The session now lives in an httpOnly cookie set by the backend — this
+// frontend code never reads or stores the token itself, so it can't be
+// stolen via XSS and never appears in the URL or localStorage.
+
 let onSessionInvalidated = null;
 
 export function setSessionInvalidatedHandler(handler) {
@@ -13,49 +14,94 @@ export function setSessionInvalidatedHandler(handler) {
 
 async function handleResponse(res) {
   if (res.status === 401) {
-    const text = await res.text().catch(() => '');
-    // If it's because the session was invalidated elsewhere
-    if (text.includes('SESSION_INVALIDATED') || text.includes('invalidated')) {
-      if (onSessionInvalidated) onSessionInvalidated();
-    }
-    // Always clear token on 401 for authenticated routes
-    localStorage.removeItem('token');
+    if (onSessionInvalidated) onSessionInvalidated();
     throw new Error('Unauthorized');
   }
   return res;
 }
 
 export async function fetchWithAuth(url, options = {}) {
-  const token = getToken();
-  const headers = {
-    ...(options.headers || {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {})
-  };
-
   const res = await fetch(`${API_BASE}${url}`, {
     ...options,
-    headers
+    credentials: 'include',
   });
-
   await handleResponse(res);
   return res;
 }
 
-export async function getProjects() {
-  const res = await fetchWithAuth('/projects');
+async function fetchJson(url, options) {
+  const res = await fetchWithAuth(url, options);
   return res.json();
 }
 
-export async function getRepositories() {
-  const res = await fetchWithAuth('/repositories');
-  return res.json();
+export function getMe() {
+  return fetchJson('/me');
 }
 
-export async function createProject(projectData) {
-  const res = await fetchWithAuth('/projects', {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+export function getProjects() {
+  return fetchJson('/projects');
+}
+
+export function getRepositories() {
+  return fetchJson('/repositories');
+}
+
+export function createProject(projectData) {
+  return fetchJson('/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(projectData),
   });
-  return res.json();
+}
+
+export function getDeployments({ limit, offset } = {}) {
+  const params = new URLSearchParams();
+  if (limit) params.set('limit', limit);
+  if (offset) params.set('offset', offset);
+  const qs = params.toString();
+  return fetchJson(`/deployments${qs ? `?${qs}` : ''}`);
+}
+
+export function getDeployment(id) {
+  return fetchJson(`/deployments/${id}`);
+}
+
+export function getLogs(projectName) {
+  return fetchJson(`/deployments/${encodeURIComponent(projectName)}/logs`);
+}
+
+export function stopDeployment(id) {
+  return fetchJson(`/deployments/${id}/stop`, { method: 'POST' });
+}
+
+export function restartDeployment(id) {
+  return fetchJson(`/deployments/${id}/restart`, { method: 'POST' });
+}
+
+export function deleteDeployment(id) {
+  return fetchJson(`/deployments/${id}`, { method: 'DELETE' });
+}
+
+export function deleteAllMyData() {
+  return fetchJson('/me', { method: 'DELETE' });
+}
+
+export async function logout() {
+  try {
+    await fetchWithAuth('/auth/logout', { method: 'POST' });
+  } catch {
+    // Ignore — we still navigate to the GitHub logout redirect below.
+  }
+}
+
+export function apkDownloadUrl(deploymentId) {
+  return `${API_BASE}/deployments/${deploymentId}/apk`;
+}
+
+export function githubLoginUrl(force = false) {
+  return `${API_BASE}/auth/github${force ? '?force=true' : ''}`;
+}
+
+export function githubLogoutUrl() {
+  return `${API_BASE}/auth/logout`;
 }

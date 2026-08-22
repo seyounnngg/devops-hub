@@ -1,39 +1,25 @@
-import React from 'react';
+import { githubLoginUrl, githubLogoutUrl, logout, deleteAllMyData } from './api';
 
 export default function Settings() {
   const handleReconnect = () => {
-    // Force re-auth with GitHub
-    window.location.href = 'https://api.hgu.app/auth/github?force=true';
+    window.location.href = githubLoginUrl(true);
   };
 
   const handleLogoutAll = async () => {
     if (!confirm('Log out from all devices?')) return;
-
-    const token = localStorage.getItem('token');
-    try {
-      await fetch('https://api.hgu.app/auth/logout', {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-    } catch (e) {}
-
-    localStorage.removeItem('token');
-    window.location.href = 'https://api.hgu.app/auth/logout';
+    await logout();
+    window.location.href = githubLogoutUrl();
   };
 
   const handleDeleteAllData = async () => {
-    if (!confirm('This will permanently delete ALL your deployment records. Are you sure?')) return;
+    if (!confirm('This will permanently delete ALL your deployment records and stop any running services. Are you sure?')) return;
     if (!confirm('This action cannot be undone. Really delete everything?')) return;
 
-    const token = localStorage.getItem('token');
     try {
-      // Note: This endpoint doesn't exist yet on backend.
-      // For now we just clear locally and log out.
-      alert('Delete all data feature is not fully implemented on the backend yet.');
-      localStorage.removeItem('token');
-      window.location.href = '/';
-    } catch (e) {
-      alert('Failed to delete data.');
+      await deleteAllMyData();
+      window.location.href = githubLogoutUrl();
+    } catch {
+      alert('Failed to delete data. Please try again.');
     }
   };
 
@@ -56,7 +42,7 @@ export default function Settings() {
                 You can deploy from private repositories.
               </div>
             </div>
-            <button 
+            <button
               onClick={handleReconnect}
               className="px-4 py-2 text-sm border border-zinc-700 hover:bg-zinc-800 rounded-xl transition"
             >
@@ -69,7 +55,7 @@ export default function Settings() {
         <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-5">
           <h2 className="text-lg font-semibold mb-4">Account</h2>
           <div className="space-y-3">
-            <button 
+            <button
               onClick={handleLogoutAll}
               className="w-full text-left px-4 py-3 bg-zinc-800 hover:bg-zinc-700 rounded-xl transition text-sm"
             >
@@ -82,9 +68,9 @@ export default function Settings() {
         <div className="bg-zinc-900 border border-red-900/50 rounded-3xl p-5">
           <h2 className="text-lg font-semibold text-red-400 mb-2">Danger Zone</h2>
           <p className="text-sm text-zinc-400 mb-4">
-            Permanently delete all your deployment history and records.
+            Permanently delete all your deployment history and records, and stop any of your services still running.
           </p>
-          <button 
+          <button
             onClick={handleDeleteAllData}
             className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-xl transition"
           >

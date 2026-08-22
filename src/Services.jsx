@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getDeployments } from './api';
 
 export default function Services() {
   const [services, setServices] = useState([]);
@@ -9,11 +10,7 @@ export default function Services() {
   useEffect(() => {
     const fetchServices = async () => {
       try {
-        const token = localStorage.getItem('token');
-        const res = await fetch('https://api.hgu.app/deployments', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        const data = await res.json();
+        const data = await getDeployments();
         const active = data.filter(d => d.status === 'running' || d.status === 'completed');
         setServices(active);
       } catch (err) {
@@ -27,8 +24,6 @@ export default function Services() {
 
   const grouped = {
     web: services.filter(s => s.service_type === 'web'),
-    cron: services.filter(s => s.service_type === 'cron'),
-    function: services.filter(s => s.service_type === 'function'),
     apk: services.filter(s => s.service_type === 'apk'),
   };
 
@@ -38,7 +33,7 @@ export default function Services() {
 
   const totalActive = services.length;
   const webCount = grouped.web.length;
-  const cronCount = grouped.cron.length;
+  const apkCount = grouped.apk.length;
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -57,9 +52,9 @@ export default function Services() {
           <div className="text-2xl font-semibold text-emerald-400">{webCount}</div>
           <div className="text-sm text-emerald-400">Web Services</div>
         </div>
-        <div className="bg-zinc-900 border border-amber-800 rounded-2xl p-4 text-center">
-          <div className="text-2xl font-semibold text-amber-400">{cronCount}</div>
-          <div className="text-sm text-amber-400">Cron Jobs</div>
+        <div className="bg-zinc-900 border border-violet-800 rounded-2xl p-4 text-center">
+          <div className="text-2xl font-semibold text-violet-400">{apkCount}</div>
+          <div className="text-sm text-violet-400">APK Builds</div>
         </div>
       </div>
 
@@ -79,39 +74,6 @@ export default function Services() {
                   return `https://${name}.hgu.app`;
                 })()}
               </div>
-            </>
-          )}
-        />
-
-        <ServiceSection
-          icon="⏰"
-          title="Cron Jobs"
-          items={grouped.cron}
-          emptyText="No active cron jobs."
-          navigate={navigate}
-          renderItem={(s) => (
-            <>
-              <div className="font-medium">{s.project_name}</div>
-              <div className="text-sm text-zinc-400 truncate">
-                {(() => {
-                  const name = (s.project_name || 'project').toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-                  return `https://${name}.hgu.app`;
-                })()}
-              </div>
-            </>
-          )}
-        />
-
-        <ServiceSection
-          icon="⚡"
-          title="Serverless Functions"
-          items={grouped.function}
-          emptyText="No active functions."
-          navigate={navigate}
-          renderItem={(s) => (
-            <>
-              <div className="font-medium">{s.project_name}</div>
-              <div className="text-sm text-zinc-400">Endpoint ready</div>
             </>
           )}
         />
@@ -141,8 +103,8 @@ function ServiceSection({ icon, title, items, emptyText, navigate, renderItem })
         <span className="text-2xl">{icon}</span>
         <h2 className="text-xl font-semibold">{title}</h2>
         <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${
-          items.length > 0 
-            ? 'bg-emerald-500/10 text-emerald-400' 
+          items.length > 0
+            ? 'bg-emerald-500/10 text-emerald-400'
             : 'bg-zinc-800 text-zinc-400'
         }`}>
           {items.length} active

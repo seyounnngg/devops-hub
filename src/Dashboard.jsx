@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { getDeployments, stopDeployment, restartDeployment, deleteDeployment, apkDownloadUrl } from "./api";
 
 function Dashboard() {
     const navigate = useNavigate();
@@ -8,16 +9,7 @@ function Dashboard() {
 
     async function loadDeployments() {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('https://api.hgu.app/deployments', {
-                headers: token ? { Authorization: `Bearer ${token}` } : {}
-            });
-            if (response.status === 401) {
-                localStorage.removeItem('token');
-                window.location.reload();
-                return;
-            }
-            const data = await response.json();
+            const data = await getDeployments();
             setDeployments(data);
         } catch (error) {
             console.error(error);
@@ -27,8 +19,6 @@ function Dashboard() {
     const getServiceLabel = (serviceType) => {
         const t = (serviceType || 'web').toLowerCase();
         if (t === 'apk') return 'APK';
-        if (t === 'function') return 'Function';
-        if (t === 'cron') return 'Cron';
         return 'Web';
     };
 
@@ -53,8 +43,6 @@ function Dashboard() {
     const SERVICE_CONFIG = {
         web: { label: 'Web', color: 'sky', icon: '◆' },
         apk: { label: 'APK', color: 'violet', icon: '◆' },
-        function: { label: 'Function', color: 'emerald', icon: '◆' },
-        cron: { label: 'Cron', color: 'amber', icon: '◆' },
     };
 
     // Color the summary card dots according to what the metric represents
@@ -68,31 +56,19 @@ function Dashboard() {
         return 'bg-zinc-400';
     }
 
-    async function stopDeployment(id) {
-        const token = localStorage.getItem('token');
-        await fetch(`https://api.hgu.app/deployments/${id}/stop`, {
-            method: 'POST',
-            headers: token ? { Authorization: `Bearer ${token}` } : {}
-        });
+    async function handleStop(id) {
+        await stopDeployment(id);
         loadDeployments();
     }
 
-    async function deleteDeployment(id) {
+    async function handleDelete(id) {
         if (!confirm("Delete this deployment?")) return;
-        const token = localStorage.getItem('token');
-        await fetch(`https://api.hgu.app/deployments/${id}`, {
-            method: 'DELETE',
-            headers: token ? { Authorization: `Bearer ${token}` } : {}
-        });
+        await deleteDeployment(id);
         loadDeployments();
     }
 
-    async function restartDeployment(id) {
-        const token = localStorage.getItem('token');
-        await fetch(`https://api.hgu.app/deployments/${id}/restart`, {
-            method: 'POST',
-            headers: token ? { Authorization: `Bearer ${token}` } : {}
-        });
+    async function handleRestart(id) {
+        await restartDeployment(id);
         loadDeployments();
     }
 
@@ -100,16 +76,14 @@ function Dashboard() {
         { label: 'All', value: 'all' },
         { label: 'Web Services', value: 'web' },
         { label: 'APK Builds', value: 'apk' },
-        { label: 'Functions', value: 'function' },
-        { label: 'Cron Jobs', value: 'cron' },
     ];
 
     useEffect(() => {
         loadDeployments();
     }, []);
 
-    const filteredDeployments = activeFilter === 'all' 
-        ? deployments 
+    const filteredDeployments = activeFilter === 'all'
+        ? deployments
         : deployments.filter(d => d.service_type === activeFilter);
 
     const getSummaryCards = (filter, items) => {
@@ -122,22 +96,6 @@ function Dashboard() {
             return [
                 { label: "Total Web Deployments", value: total },
                 { label: "Running Services", value: running },
-                { label: "Failed", value: failed },
-                { label: "Completed", value: completed },
-            ];
-        }
-        if (filter === 'cron') {
-            return [
-                { label: "Total Cron Jobs", value: total },
-                { label: "Active Jobs", value: running },
-                { label: "Failed", value: failed },
-                { label: "Completed", value: completed },
-            ];
-        }
-        if (filter === 'function') {
-            return [
-                { label: "Total Functions", value: total },
-                { label: "Active", value: running },
                 { label: "Failed", value: failed },
                 { label: "Completed", value: completed },
             ];
@@ -172,8 +130,8 @@ function Dashboard() {
                         {activeFilter === 'all' ? 'Dashboard' : filterOptions.find(f => f.value === activeFilter)?.label}
                     </h1>
                     <p className="text-zinc-400 mt-2 text-[15px]">
-                        {activeFilter === 'all' 
-                            ? 'All deployments across your projects' 
+                        {activeFilter === 'all'
+                            ? 'All deployments across your projects'
                             : `Your ${activeFilter} deployments`}
                     </p>
                 </div>
@@ -191,8 +149,8 @@ function Dashboard() {
                     <div className="inline-flex bg-zinc-900/80 border border-zinc-800 rounded-2xl p-1 min-w-max lg:min-w-0">
                         {filterOptions.map(option => {
                         const isActive = activeFilter === option.value;
-                        const count = option.value === 'all' 
-                            ? deployments.length 
+                        const count = option.value === 'all'
+                            ? deployments.length
                             : deployments.filter(d => d.service_type === option.value).length;
                         return (
                             <button
@@ -221,8 +179,8 @@ function Dashboard() {
                     const dotColor = getSummaryDotColor(card.label);
 
                     return (
-                        <div 
-                            key={index} 
+                        <div
+                            key={index}
                             className="group bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-3xl p-6 transition-all hover:-translate-y-px"
                         >
                             <div className="flex items-center gap-2 mb-3">
@@ -250,8 +208,8 @@ function Dashboard() {
                             {activeFilter === 'all' ? 'No deployments yet' : `No ${activeFilter} deployments`}
                         </h3>
                         <p className="text-zinc-400 max-w-sm text-[15px]">
-                            {activeFilter === 'all' 
-                                ? "Click the '+ New Deployment' button in the header to get started." 
+                            {activeFilter === 'all'
+                                ? "Click the '+ New Deployment' button in the header to get started."
                                 : "Switch filters or use the '+ New Deployment' button above."}
                         </p>
                     </div>
@@ -276,13 +234,10 @@ function Dashboard() {
                         let primaryInfo = '';
                         const demoUrl = getDemoDisplayUrl(deployment);
                         if (t === 'web') primaryInfo = demoUrl;
-                        else if (t === 'function') primaryInfo = demoUrl;
-                        else if (t === 'cron') primaryInfo = demoUrl;
                         else if (t === 'apk') primaryInfo = deployment.apk_url ? 'APK ready for download' : 'Build in progress';
 
                         const isFailed = deployment.status === 'failed';
                         const isRunning = deployment.status === 'running' || deployment.status === 'completed';
-                        const statusColor = isFailed ? 'red' : isRunning ? 'emerald' : 'amber';
 
                         return (
                             <div
@@ -309,16 +264,9 @@ function Dashboard() {
                                                 {config.label}
                                             </div>
                                         )}
-                                        {t === 'function' && (
-                                            <div className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 tracking-wide">
-                                                <span className="opacity-75">{config.icon}</span>
-                                                {config.label}
-                                            </div>
-                                        )}
-                                        {t === 'cron' && (
-                                            <div className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full bg-amber-500/10 text-amber-400 tracking-wide">
-                                                <span className="opacity-75">{config.icon}</span>
-                                                {config.label}
+                                        {t !== 'web' && t !== 'apk' && (
+                                            <div className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full bg-zinc-800 text-zinc-400 tracking-wide">
+                                                {getServiceLabel(deployment.service_type)}
                                             </div>
                                         )}
 
@@ -384,8 +332,9 @@ function Dashboard() {
                                     {/* APK Download */}
                                     {t === 'apk' && deployment.apk_url && (
                                         <a
-                                            href={`https://api.hgu.app${deployment.apk_url}`}
+                                            href={apkDownloadUrl(deployment.id)}
                                             target="_blank"
+                                            rel="noopener noreferrer"
                                             onClick={(e) => e.stopPropagation()}
                                             className="flex-1 min-w-[92px] py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white text-center rounded-xl transition"
                                         >
@@ -397,14 +346,14 @@ function Dashboard() {
                                     {t === 'web' && deployment.status !== 'failed' && (
                                         deployment.status === 'running' ? (
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); stopDeployment(deployment.id); }}
+                                                onClick={(e) => { e.stopPropagation(); handleStop(deployment.id); }}
                                                 className="flex-1 min-w-[92px] py-2 text-sm font-medium bg-yellow-500/10 hover:bg-yellow-500/15 text-yellow-400 rounded-xl transition"
                                             >
                                                 Stop
                                             </button>
                                         ) : (
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); restartDeployment(deployment.id); }}
+                                                onClick={(e) => { e.stopPropagation(); handleRestart(deployment.id); }}
                                                 className="flex-1 min-w-[92px] py-2 text-sm font-medium bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400 rounded-xl transition"
                                             >
                                                 Restart
@@ -431,7 +380,7 @@ function Dashboard() {
                                         onClick={(e) => {
                                             e.stopPropagation();
                                             if (confirm(`Delete ${deployment.project_name}?`)) {
-                                                deleteDeployment(deployment.id);
+                                                handleDelete(deployment.id);
                                             }
                                         }}
                                         className="px-4 py-2 text-sm font-medium bg-red-500/10 hover:bg-red-500/15 text-red-400 rounded-xl transition"

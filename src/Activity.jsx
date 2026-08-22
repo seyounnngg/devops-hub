@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getDeployments } from './api';
 
 export default function Activity() {
   const [activities, setActivities] = useState([]);
@@ -11,16 +12,7 @@ export default function Activity() {
   useEffect(() => {
     const fetchActivities = async () => {
       try {
-        const token = localStorage.getItem('token');
-        const res = await fetch('https://api.hgu.app/deployments', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (res.status === 401) {
-          localStorage.removeItem('token');
-          window.location.reload();
-          return;
-        }
-        const data = await res.json();
+        const data = await getDeployments();
         const sorted = data.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         setActivities(sorted);
       } catch (err) {
@@ -42,8 +34,6 @@ export default function Activity() {
   const getServiceLabel = (type) => {
     if (type === 'web') return 'Web';
     if (type === 'apk') return 'APK';
-    if (type === 'function') return 'Function';
-    if (type === 'cron') return 'Cron';
     return 'Other';
   };
 

@@ -1,80 +1,46 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl } from "./api";
 
 function DeploymentDetail() {
 
     const navigate = useNavigate();
     const logContainerRef = useRef(null);
+    const bottomRef = useRef(null);
 
     const [logs, setLogs] = useState([]);
     const [deployment, setDeployment] = useState(null);
-    const [isFailed, setIsFailed] = useState(false);
 
     const projectName = localStorage.getItem("currentProject");
-
-    if (!projectName) {
-        return (
-            <div className="max-w-2xl mx-auto py-12 text-center">
-                <div className="text-2xl font-semibold mb-3 tracking-tight">No project selected</div>
-                <p className="text-zinc-400 mb-6">Please start a deployment from the New Deployment page.</p>
-                <button 
-                    onClick={() => navigate("/dashboard")}
-                    className="px-6 py-3 bg-white text-black font-semibold rounded-2xl hover:bg-zinc-100 transition"
-                >
-                    Back to Dashboard
-                </button>
-            </div>
-        );
-    }
 
     useEffect(() => {
         if (!projectName) return;
 
+        const TERMINAL_STATUSES = ['running', 'completed', 'failed', 'stopped'];
+        let interval = null;
+
         async function fetchData() {
-            const token = localStorage.getItem('token');
-            const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
-
             try {
-                const logsRes = await fetch(`https://api.hgu.app/deployments/${projectName}/logs`, { headers: authHeaders });
-                if (logsRes.status === 401) { localStorage.removeItem('token'); window.location.reload(); return; }
-                const logsData = await logsRes.json();
-                const newLogs = Array.isArray(logsData) ? logsData : [];
-                setLogs(newLogs);
+                const newLogs = await getLogs(projectName);
+                setLogs(Array.isArray(newLogs) ? newLogs : []);
 
-                // Detect failure from logs (more reliable, including early validation errors)
-                const hasFailure = newLogs.some(l => {
-                    if (typeof l !== 'string') return false;
-                    const lower = l.toLowerCase();
-                    return l.includes('❌') ||
-                           lower.includes('failed') ||
-                           lower.includes('error') ||
-                           l.includes('no Flutter project files') ||
-                           l.includes('Clone succeeded but') ||
-                           l.includes('Check token scopes');
-                });
-                setIsFailed(hasFailure);
-
-                const listRes = await fetch('https://api.hgu.app/deployments', { headers: authHeaders });
-                if (listRes.status === 401) { localStorage.removeItem('token'); window.location.reload(); return; }
-                const allDeps = await listRes.json();
+                const allDeps = await getDeployments();
                 const current = allDeps.find(d => d.project_name === projectName);
-                
-                if (current) {
-                    try {
-                        const detailRes = await fetch(`https://api.hgu.app/deployments/${current.id}`, { headers: authHeaders });
-                        if (detailRes.ok) {
-                            const detailData = await detailRes.json();
-                            setDeployment(detailData);
-                        } else {
-                            setDeployment(current);
-                        }
-                    } catch {
-                        setDeployment(current);
-                    }
 
-                    // Also mark as failed if the backend reports failed status
-                    if (current.status === 'failed') {
-                        setIsFailed(true);
+                if (current) {
+                    let detailData = current;
+                    try {
+                        detailData = await getDeployment(current.id);
+                    } catch {
+                        // fall back to the list entry
+                    }
+                    setDeployment(detailData);
+
+                    // Once the deployment reaches a terminal state there's nothing new to
+                    // poll for (an APK's status won't flip back to "building").
+                    if (TERMINAL_STATUSES.includes(detailData.status) && interval) {
+                        clearInterval(interval);
+                        interval = null;
                     }
                 }
             } catch (error) {
@@ -83,19 +49,32 @@ function DeploymentDetail() {
         }
 
         fetchData();
-        const interval = setInterval(fetchData, 3500);
-        return () => clearInterval(interval);
+        interval = setInterval(fetchData, 3500);
+        return () => { if (interval) clearInterval(interval); };
 
     }, [projectName]);
 
     // Reliable auto-scroll using a bottom anchor (much more stable for live logs)
-    const bottomRef = useRef(null);
-
     useEffect(() => {
         if (bottomRef.current) {
             bottomRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
         }
     }, [logs.length]);
+
+    if (!projectName) {
+        return (
+            <div className="max-w-2xl mx-auto py-12 text-center">
+                <div className="text-2xl font-semibold mb-3 tracking-tight">No project selected</div>
+                <p className="text-zinc-400 mb-6">Please start a deployment from the New Deployment page.</p>
+                <button
+                    onClick={() => navigate("/dashboard")}
+                    className="px-6 py-3 bg-white text-black font-semibold rounded-2xl hover:bg-zinc-100 transition"
+                >
+                    Back to Dashboard
+                </button>
+            </div>
+        );
+    }
 
     // Always show using project name as subdomain (demo visual cleanliness)
     const getDemoDisplayUrl = (dep) => {
@@ -112,16 +91,16 @@ function DeploymentDetail() {
 
     const serviceUrl = getDemoDisplayUrl(deployment);
 
-    const isApk = deployment?.service_type === 'apk' || logs.some(l => typeof l === 'string' && l.includes('APK Build'));
+    const isApk = deployment?.service_type === 'apk';
 
-    // Simple and reliable: if any "❌" appears in the logs, treat it as failed immediately.
-    // Especially treat the new clear "[Final] Deployment Failed" line the same way success "✅ Deployment process completed" lines work.
-    const hasErrorLog = logs.some(l => typeof l === 'string' && l.includes('❌'));
-    const effectiveIsFailed = isFailed || hasErrorLog || deployment?.status === 'failed';
+    // The DB record's status is the source of truth once it exists. Scanning log
+    // text for "❌"/"error" is only a fallback for the brief window before the
+    // deployment row has been created (e.g. an early validation failure).
+    const effectiveIsFailed = deployment
+        ? deployment.status === 'failed'
+        : logs.some(l => typeof l === 'string' && l.includes('❌'));
 
-    const isBuilding = !deployment || deployment.status === 'pending' || deployment.status === 'building' || (!effectiveIsFailed && logs.length > 0 && !logs.some(l => l.includes('✅') && l.includes('completed')));
-
-
+    const isBuilding = !deployment || deployment.status === 'pending' || deployment.status === 'building';
 
     return (
         <div className="max-w-5xl mx-auto py-8">
@@ -165,29 +144,27 @@ function DeploymentDetail() {
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-5">
                         <div>
                             <div className="font-semibold text-2xl tracking-tight mb-2">{deployment.project_name}</div>
-                            
+
                             <div className="flex items-center gap-3">
                                 <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold tracking-wide ${
                                     deployment.status === 'completed' || deployment.status === 'running'
-                                        ? 'bg-emerald-500/10 text-emerald-400' 
-                                        : effectiveIsFailed 
+                                        ? 'bg-emerald-500/10 text-emerald-400'
+                                        : effectiveIsFailed
                                             ? 'bg-red-500/10 text-red-400'
                                             : 'bg-amber-500/10 text-amber-400'
                                 }`}>
                                     {deployment.status || (effectiveIsFailed ? 'failed' : 'in progress')}
                                 </span>
                                 <span className="text-xs px-3 py-1 bg-zinc-800 rounded-full text-zinc-400">
-                                    {deployment.service_type === 'apk' ? 'APK' : 
-                                     deployment.service_type === 'function' ? 'Function' : 
-                                     deployment.service_type === 'cron' ? 'Cron' : 'Web'}
+                                    {deployment.service_type === 'apk' ? 'APK' : 'Web'}
                                 </span>
                             </div>
                         </div>
 
                         {deployment.apk_url ? (
-                            <a 
-                                href={`https://api.hgu.app${deployment.apk_url}`} 
-                                target="_blank" 
+                            <a
+                                href={apkDownloadUrl(deployment.id)}
+                                target="_blank"
                                 rel="noopener noreferrer"
                                 className="inline-flex items-center justify-center px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-2xl transition"
                             >
@@ -196,9 +173,9 @@ function DeploymentDetail() {
                         ) : serviceUrl && !isBuilding && (
                             <div className="text-left md:text-right">
                                 <div className="text-xs text-zinc-500 mb-1">Service URL</div>
-                                <a 
-                                    href={serviceUrl} 
-                                    target="_blank" 
+                                <a
+                                    href={serviceUrl}
+                                    target="_blank"
                                     rel="noopener noreferrer"
                                     className="text-lg font-semibold text-white hover:text-blue-400 break-all"
                                 >
@@ -216,7 +193,7 @@ function DeploymentDetail() {
                 <span className="text-xs text-zinc-500 font-mono">{logs.length} lines</span>
             </div>
 
-            <div 
+            <div
                 ref={logContainerRef}
                 className="bg-zinc-950 border border-zinc-800 rounded-3xl p-6 font-mono text-sm text-emerald-400 h-[450px] overflow-y-auto whitespace-pre-wrap"
             >
@@ -245,13 +222,8 @@ function DeploymentDetail() {
                     onClick={async () => {
                         if (!confirm('Delete this deployment record?')) return;
                         try {
-                            const token = localStorage.getItem('token');
-                            const depId = deployment?.id;
-                            if (depId) {
-                                await fetch(`https://api.hgu.app/deployments/${depId}`, {
-                                    method: 'DELETE',
-                                    headers: token ? { Authorization: `Bearer ${token}` } : {}
-                                });
+                            if (deployment?.id) {
+                                await deleteDeployment(deployment.id);
                             }
                         } catch (e) {
                             console.error(e);
@@ -270,9 +242,9 @@ function DeploymentDetail() {
                 </div>
             )}
 
-            {isApk && isBuilding && !isFailed && (
+            {isApk && isBuilding && !effectiveIsFailed && (
                 <div className="mt-4 text-xs text-zinc-500 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4">
-                    APK builds are faster after the first run thanks to Docker image and dependency caching. 
+                    APK builds are faster after the first run thanks to Docker image and dependency caching.
                     This is normal and only happens once. The build will continue in the background.
                 </div>
             )}
