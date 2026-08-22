@@ -1,12 +1,65 @@
 const fs = require('fs');
 const path = require('path');
 
+function readFileSafe(filePath) {
+    try {
+        return fs.readFileSync(filePath, 'utf8');
+    } catch (e) {
+        return '';
+    }
+}
+
+/** Best-effort framework sniff for a Python project: looks for the package
+ *  name in whichever dependency file is present. Order matters — check the
+ *  more specific framework first since a project can list both (e.g. a
+ *  FastAPI app that also happens to depend on Flask utilities). */
+function detectPythonFramework(projectPath) {
+    const depFiles = ['requirements.txt', 'pyproject.toml', 'Pipfile']
+        .map(f => path.join(projectPath, f))
+        .filter(f => fs.existsSync(f));
+
+    const contents = depFiles.map(readFileSafe).join('\n').toLowerCase();
+
+    if (contents.includes('fastapi')) return 'fastapi';
+    if (contents.includes('flask')) return 'flask';
+    return 'generic';
+}
+
 /**
- * Detects common web project types.
- * Priority: Next.js > Vite React > Create React App > Static > Unknown
+ * Detects common project types across the languages this platform builds
+ * Dockerfiles for. Language-specific marker files (pom.xml, go.mod,
+ * manage.py, requirements.txt/pyproject.toml/Pipfile) are checked first
+ * since they're unambiguous; the existing Node/JS cascade (via package.json)
+ * runs after, followed by the static-site fallback.
  */
 function detectProjectType(projectPath) {
     try {
+        // --- Java ---
+        if (fs.existsSync(path.join(projectPath, 'pom.xml'))) {
+            return { type: 'java-maven', framework: 'java' };
+        }
+        if (fs.existsSync(path.join(projectPath, 'build.gradle')) ||
+            fs.existsSync(path.join(projectPath, 'build.gradle.kts'))) {
+            return { type: 'java-gradle', framework: 'java' };
+        }
+
+        // --- Go ---
+        if (fs.existsSync(path.join(projectPath, 'go.mod'))) {
+            return { type: 'go', framework: 'go' };
+        }
+
+        // --- Python ---
+        if (fs.existsSync(path.join(projectPath, 'manage.py'))) {
+            return { type: 'python-django', framework: 'django' };
+        }
+        const hasPythonDeps = ['requirements.txt', 'pyproject.toml', 'Pipfile']
+            .some(f => fs.existsSync(path.join(projectPath, f)));
+        if (hasPythonDeps) {
+            const framework = detectPythonFramework(projectPath);
+            return { type: `python-${framework}`, framework };
+        }
+
+        // --- Node / JS (existing detection) ---
         const packageJsonPath = path.join(projectPath, 'package.json');
 
         if (!fs.existsSync(packageJsonPath)) {

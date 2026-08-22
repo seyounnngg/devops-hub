@@ -22,6 +22,21 @@ try {
 
 const MEM_LIMIT = process.env.DEPLOY_MEM_LIMIT || '512m';
 const CPU_LIMIT = process.env.DEPLOY_CPU_LIMIT || '1';
+
+// Internal container port each auto-generated template's CMD actually listens on.
+// Anything not listed here (e.g. static/nginx-based templates) defaults to 80.
+const DEFAULT_INTERNAL_PORT = {
+    nextjs: 3000,
+    'node-generic': 3000,
+    'node-backend': 3000,
+    'python-django': 8000,
+    'python-fastapi': 8000,
+    'python-generic': 8000,
+    'python-flask': 5000,
+    'java-maven': 8080,
+    'java-gradle': 8080,
+    go: 8080
+};
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 async function cleanupProjectDir(projectPath, addLog) {
@@ -106,20 +121,18 @@ async function deploy(params, { addLog }) {
                         addLog(`✅ Auto-generated Dockerfile for ${detection.type}.`);
                         addLog('   This project will be built without a Dockerfile in your repository.');
                     }
+                    if (detection.type === 'python-flask') {
+                        addLog("   Note: make sure app.run() uses host='0.0.0.0' — 127.0.0.1 is not reachable from outside the container.");
+                    }
                     dockerfilePath = generatedDockerfile;
 
                     if (!params.internalPort) {
-                        if (detection.type === 'nextjs') {
-                            internalPort = 3000;
-                        } else if (['node-generic', 'node-backend'].includes(detection.type)) {
-                            internalPort = 3000;
-                        } else {
-                            internalPort = 80;
-                        }
+                        internalPort = DEFAULT_INTERNAL_PORT[detection.type] || 80;
                     }
                 } else {
                     addLog('❌ [Final] Deployment Failed: Could not auto-detect project type.');
-                    addLog('   Please add a Dockerfile to your repository root, or use a supported framework (Next.js / Vite React).');
+                    addLog('   Please add a Dockerfile to your repository root, or use a supported framework');
+                    addLog('   (Next.js / Vite React / Node / Python / Java / Go).');
                     failureStage = 'validation_failed';
                     throw new Error('No Dockerfile found and could not auto-generate one for this project type.');
                 }

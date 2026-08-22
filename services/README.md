@@ -4,6 +4,8 @@ This folder contains the deployment logic split by service type.
 
 ## Supported Service Types
 - **Web** → Main focus. Clones a repo, builds/detects a Dockerfile, runs the container, health-checks it, and registers an Nginx Proxy Manager host.
+  - If the repo has its own `Dockerfile`, that's used as-is — any language works.
+  - Without one, `web/projectDetector.js` auto-generates a Dockerfile (`web/generateDockerfile.js` + `templates/`) for: Next.js, Vite/CRA/React, Node (Express/Fastify/Koa), plain static HTML, Python (Django / Flask / FastAPI / generic), Java (Maven or Gradle, incl. Spring Boot), and Go.
 - **APK** → Builds simple Flutter / basic Android (Gradle) projects and produces a downloadable `.apk`.
 
 Function and Cron service types were removed: they were stub implementations

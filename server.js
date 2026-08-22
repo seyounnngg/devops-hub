@@ -438,9 +438,12 @@ app.get('/projects', async (req, res) => {
     try {
         const user = await getAuthenticatedUser(req);
         const { limit, offset } = parsePagination(req);
+        // mysql2's execute() (binary prepared-statement protocol) rejects LIMIT/OFFSET as
+        // bound params ("Incorrect arguments to mysqld_stmt_execute"). limit/offset are
+        // already clamped to integers by parsePagination(), so inlining them is safe.
         const [rows] = await pool.execute(
-            `SELECT * FROM deployments WHERE github_user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-            [user.id, limit, offset]
+            `SELECT * FROM deployments WHERE github_user_id = ? ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`,
+            [user.id]
         );
         res.json(rows);
     } catch (error) {
@@ -549,9 +552,12 @@ app.get('/deployments', async (req, res) => {
     try {
         const user = await getAuthenticatedUser(req);
         const { limit, offset } = parsePagination(req);
+        // mysql2's execute() (binary prepared-statement protocol) rejects LIMIT/OFFSET as
+        // bound params ("Incorrect arguments to mysqld_stmt_execute"). limit/offset are
+        // already clamped to integers by parsePagination(), so inlining them is safe.
         const [rows] = await pool.execute(
-            `SELECT * FROM deployments WHERE github_user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-            [user.id, limit, offset]
+            `SELECT * FROM deployments WHERE github_user_id = ? ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`,
+            [user.id]
         );
         res.json(rows);
     } catch (error) {

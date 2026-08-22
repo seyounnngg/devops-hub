@@ -36,6 +36,27 @@ function ensureDockerfile(projectPath, detection) {
         case 'generic-web':
             templateName = 'generic-web.Dockerfile';
             break;
+        case 'python-django':
+            templateName = 'python-django.Dockerfile';
+            break;
+        case 'python-flask':
+            templateName = 'python-flask.Dockerfile';
+            break;
+        case 'python-fastapi':
+            templateName = 'python-fastapi.Dockerfile';
+            break;
+        case 'python-generic':
+            templateName = 'python-generic.Dockerfile';
+            break;
+        case 'java-maven':
+            templateName = 'java-maven.Dockerfile';
+            break;
+        case 'java-gradle':
+            templateName = 'java-gradle.Dockerfile';
+            break;
+        case 'go':
+            templateName = 'go.Dockerfile';
+            break;
         default:
             // Last resort: if there's a package.json, still try a generic web approach
             if (fs.existsSync(path.join(projectPath, 'package.json'))) {
