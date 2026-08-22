@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars, addCustomDomain, removeCustomDomain } from "./api";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars, addCustomDomain, removeCustomDomain, redeployProject, rollbackToBuild, getBuildHistory } from "./api";
 
 function DeploymentDetail() {
 
@@ -19,6 +19,15 @@ function DeploymentDetail() {
     const [domainInput, setDomainInput] = useState('');
     const [domainBusy, setDomainBusy] = useState(false);
     const [domainMessage, setDomainMessage] = useState('');
+
+    const [builds, setBuilds] = useState([]);
+    const [redeploying, setRedeploying] = useState(false);
+    const [redeployMessage, setRedeployMessage] = useState('');
+    // Bumping this restarts the polling loop below — needed because that loop
+    // stops once the deployment reaches 'running' (nothing left to watch), but
+    // a fresh redeploy needs live progress again even though the *old*
+    // container is still reporting 'running' right up until the swap happens.
+    const [redeployNonce, setRedeployNonce] = useState(0);
 
     const projectName = localStorage.getItem("currentProject");
 
@@ -61,7 +70,7 @@ function DeploymentDetail() {
         interval = setInterval(fetchData, 3500);
         return () => { if (interval) clearInterval(interval); };
 
-    }, [projectName]);
+    }, [projectName, redeployNonce]);
 
     // Reliable auto-scroll using a bottom anchor (much more stable for live logs)
     useEffect(() => {
@@ -69,6 +78,45 @@ function DeploymentDetail() {
             bottomRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
         }
     }, [logs.length]);
+
+    // Refresh build history whenever the deployment status changes (covers both the
+    // initial load and each time a redeploy/rollback finishes).
+    useEffect(() => {
+        if (!deployment?.id || deployment.service_type !== 'web') return;
+        getBuildHistory(deployment.id).then(setBuilds).catch(() => {});
+    }, [deployment?.id, deployment?.status, deployment?.service_type]);
+
+    async function handleRedeploy() {
+        if (!deployment?.id || redeploying) return;
+        if (!confirm(`Redeploy ${deployment.project_name} from the latest commit on ${deployment.branch || 'its branch'}?`)) return;
+        setRedeploying(true);
+        setRedeployMessage('');
+        setLogs([]);
+        setRedeployNonce(n => n + 1);
+        try {
+            await redeployProject(deployment.id);
+        } catch (e) {
+            setRedeployMessage(e.message || 'Redeploy failed to start.');
+        } finally {
+            setRedeploying(false);
+        }
+    }
+
+    async function handleRollback(build) {
+        if (!deployment?.id || redeploying) return;
+        if (!confirm(`Roll back ${deployment.project_name} to commit ${build.commit_hash}? This rebuilds and swaps in that version.`)) return;
+        setRedeploying(true);
+        setRedeployMessage('');
+        setLogs([]);
+        setRedeployNonce(n => n + 1);
+        try {
+            await rollbackToBuild(deployment.id, build.id);
+        } catch (e) {
+            setRedeployMessage(e.message || 'Rollback failed to start.');
+        } finally {
+            setRedeploying(false);
+        }
+    }
 
     // Load saved env vars into the editable rows once per deployment id — not on every
     // poll tick, so it doesn't overwrite whatever the user is currently typing.
@@ -229,7 +277,17 @@ function DeploymentDetail() {
                                 <span className="text-xs px-3 py-1 bg-zinc-800 rounded-full text-zinc-400">
                                     {deployment.service_type === 'apk' ? 'APK' : 'Web'}
                                 </span>
+                                {deployment.service_type === 'web' && deployment.branch && (
+                                    <button
+                                        onClick={handleRedeploy}
+                                        disabled={redeploying}
+                                        className="text-xs px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-full transition disabled:opacity-60"
+                                    >
+                                        {redeploying ? 'Redeploying...' : '↻ Redeploy'}
+                                    </button>
+                                )}
                             </div>
+                            {redeployMessage && <p className="text-xs text-red-400 mt-2">{redeployMessage}</p>}
                         </div>
 
                         {deployment.apk_url ? (
@@ -379,6 +437,48 @@ function DeploymentDetail() {
                         </>
                     )}
                     {domainMessage && <p className="text-xs text-zinc-400 mt-3">{domainMessage}</p>}
+                </div>
+            )}
+
+            {/* Deployment History (Web only) */}
+            {deployment && deployment.service_type === 'web' && builds.length > 0 && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+                    <div className="font-semibold tracking-tight mb-1">Deployment History</div>
+                    <p className="text-xs text-zinc-500 mb-4">Roll back to any previous successful build.</p>
+
+                    <div className="divide-y divide-zinc-800">
+                        {builds.map((build, i) => {
+                            const isCurrent = i === 0 && build.status === 'success';
+                            return (
+                                <div key={build.id} className="py-3 flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-mono text-sm text-white">{build.commit_hash || '—'}</span>
+                                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                                                build.status === 'success' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                                            }`}>
+                                                {build.status}
+                                            </span>
+                                            {build.triggered_by !== 'manual' && (
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">{build.triggered_by}</span>
+                                            )}
+                                            {isCurrent && <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400">current</span>}
+                                        </div>
+                                        <div className="text-xs text-zinc-500 mt-0.5">{new Date(build.created_at).toLocaleString()}</div>
+                                    </div>
+                                    {!isCurrent && build.status === 'success' && (
+                                        <button
+                                            onClick={() => handleRollback(build)}
+                                            disabled={redeploying}
+                                            className="shrink-0 px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition disabled:opacity-60"
+                                        >
+                                            Rollback to this
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
                 </div>
             )}
 

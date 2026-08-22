@@ -108,6 +108,22 @@ export function removeCustomDomain(id) {
   return fetchJson(`/deployments/${id}/domain`, { method: 'DELETE' });
 }
 
+export function redeployProject(id) {
+  return fetchJson(`/deployments/${id}/redeploy`, { method: 'POST' });
+}
+
+export function rollbackToBuild(id, buildId) {
+  return fetchJson(`/deployments/${id}/rollback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ buildId }),
+  });
+}
+
+export function getBuildHistory(id) {
+  return fetchJson(`/deployments/${id}/builds`);
+}
+
 export function deleteAllMyData() {
   return fetchJson('/me', { method: 'DELETE' });
 }
