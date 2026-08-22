@@ -499,6 +499,16 @@ app.post('/projects', deployLimiter, async (req, res) => {
             });
         }
 
+        const [existingRows] = await pool.execute(
+            `SELECT id FROM deployments WHERE github_user_id = ? AND project_name = ? AND status != 'failed' LIMIT 1`,
+            [decoded.id, name]
+        );
+        if (existingRows.length > 0) {
+            return res.status(409).json({
+                error: `You already have a project named "${name}". Use Redeploy from its detail page to update it.`
+            });
+        }
+
         const projectName = name;
         const key = logsKey(decoded.id, projectName);
         deploymentLogs[key] = [];
@@ -779,6 +789,140 @@ app.delete('/deployments/:id/domain', async (req, res) => {
         }
         console.error(error);
         res.status(500).json({ error: 'Failed to remove custom domain' });
+    }
+});
+
+/** Shared by /redeploy and /rollback — both are "build this commit and swap it in for
+ *  the currently-running container", they only differ in which commit and how it's logged. */
+async function runRedeploy(user, deployment, { commitOverride = null, triggeredBy = 'manual' } = {}) {
+    const key = logsKey(user.id, deployment.project_name);
+    deploymentLogs[key] = [];
+    const addLog = (message) => {
+        console.log(message);
+        deploymentLogs[key].push(message);
+    };
+
+    let envVars = null;
+    try {
+        envVars = deployment.env_vars ? JSON.parse(deployment.env_vars) : null;
+    } catch (_) { /* ignore malformed stored env_vars */ }
+
+    addLog(`🚀 ${triggeredBy === 'rollback' ? 'Rollback' : 'Redeploy'} started for ${deployment.project_name}`);
+
+    const result = await deployProject(
+        {
+            name: deployment.project_name,
+            repository: deployment.repository_name,
+            branch: deployment.branch,
+            serviceType: 'web',
+            githubToken: user.github_access_token,
+            githubUsername: user.username,
+            githubUserId: user.id,
+            pool,
+            envVars,
+            existingDeployment: deployment,
+            commitOverride,
+            triggeredBy
+        },
+        {
+            addLog,
+            onComplete: () => {},
+            onError: (err) => addLog(`❌ Error during deployment: ${err.message}`)
+        }
+    );
+
+    await persistDeploymentLogs(user.id, deployment.project_name);
+    return result;
+}
+
+async function loadOwnedWebDeployment(req, res) {
+    const user = await getAuthenticatedUser(req);
+    const [rows] = await pool.execute(
+        'SELECT * FROM deployments WHERE id = ? AND github_user_id = ?',
+        [req.params.id, user.id]
+    );
+    if (rows.length === 0) {
+        res.status(404).json({ error: 'Deployment not found or access denied' });
+        return null;
+    }
+    const deployment = rows[0];
+    if (deployment.service_type !== 'web') {
+        res.status(400).json({ error: 'Only Web deployments support this action' });
+        return null;
+    }
+    if (!deployment.repository_name || !deployment.branch) {
+        res.status(400).json({ error: 'This deployment predates redeploy support — delete and recreate it to enable it.' });
+        return null;
+    }
+    return { user, deployment };
+}
+
+app.post('/deployments/:id/redeploy', deployLimiter, async (req, res) => {
+    try {
+        const loaded = await loadOwnedWebDeployment(req, res);
+        if (!loaded) return;
+        const result = await runRedeploy(loaded.user, loaded.deployment, { triggeredBy: 'manual' });
+        res.json(result);
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        console.error(error);
+        res.status(error.status || 500).json({ error: error.message || 'Redeploy failed' });
+    }
+});
+
+app.post('/deployments/:id/rollback', deployLimiter, async (req, res) => {
+    try {
+        const loaded = await loadOwnedWebDeployment(req, res);
+        if (!loaded) return;
+        const { user, deployment } = loaded;
+
+        const { buildId } = req.body;
+        const [buildRows] = await pool.execute(
+            'SELECT * FROM deployment_builds WHERE id = ? AND deployment_id = ?',
+            [buildId, deployment.id]
+        );
+        if (buildRows.length === 0) {
+            return res.status(404).json({ error: 'Build not found in this deployment\'s history' });
+        }
+        const build = buildRows[0];
+        if (!build.commit_hash) {
+            return res.status(400).json({ error: 'This build has no recorded commit to roll back to' });
+        }
+
+        const result = await runRedeploy(user, deployment, { commitOverride: build.commit_hash, triggeredBy: 'rollback' });
+        res.json(result);
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        console.error(error);
+        res.status(error.status || 500).json({ error: error.message || 'Rollback failed' });
+    }
+});
+
+app.get('/deployments/:id/builds', async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
+        const [rows] = await pool.execute(
+            'SELECT id FROM deployments WHERE id = ? AND github_user_id = ?',
+            [req.params.id, user.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Deployment not found or access denied' });
+        }
+        const [builds] = await pool.execute(
+            'SELECT id, commit_hash, status, triggered_by, created_at FROM deployment_builds WHERE deployment_id = ? ORDER BY created_at DESC LIMIT 20',
+            [req.params.id]
+        );
+        res.json(builds);
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Failed to fetch build history' });
     }
 });
 

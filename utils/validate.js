@@ -49,6 +49,17 @@ function assertSafePathSegment(segment, label = 'path') {
 // Hostname labels: 1-63 chars, alphanumeric + hyphen, not starting/ending with a hyphen.
 const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 
+const COMMIT_RE = /^[0-9a-f]{7,40}$/i;
+
+function assertSafeCommitHash(commit) {
+    if (typeof commit !== 'string' || !COMMIT_RE.test(commit)) {
+        const err = new Error('Invalid commit hash.');
+        err.status = 400;
+        throw err;
+    }
+    return commit;
+}
+
 function assertSafeDomain(domain) {
     if (typeof domain !== 'string' || !DOMAIN_RE.test(domain)) {
         const err = new Error('Invalid domain. Enter a plain hostname like myapp.com (no protocol or path).');
@@ -63,5 +74,6 @@ module.exports = {
     assertSafeRepository,
     assertSafeBranch,
     assertSafePathSegment,
-    assertSafeDomain
+    assertSafeDomain,
+    assertSafeCommitHash
 };

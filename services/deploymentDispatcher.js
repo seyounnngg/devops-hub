@@ -1,12 +1,18 @@
 const webDeployer = require('./webDeployer');
 const apkBuilder = require('./apkBuilder');
-const { safeInsertDeployment } = require('../utils/dbHelpers');
 
 /**
  * Dispatches deployment to the correct service handler based on serviceType.
  * Web and APK are the only supported service types — Function and Cron were
  * removed (stub-only implementations with no real isolation or resource
  * limits; see services/README.md for history).
+ *
+ * Failure recording is entirely the individual deployer's job (webDeployer.js
+ * / apkBuilder.js each self-record to `deployments`/`deployment_builds` in
+ * their own catch blocks before rethrowing) — this used to *also* insert a
+ * fallback failed row here, which just meant every failure was recorded
+ * twice, and for a failed redeploy it inserted a bogus extra row for what
+ * should stay a single existing project.
  */
 async function deployProject(params, { addLog, onComplete, onError }) {
     const { serviceType } = params;
@@ -36,27 +42,6 @@ async function deployProject(params, { addLog, onComplete, onError }) {
     } catch (error) {
         addLog(`❌ Deployment failed: ${error.message}`);
         if (onError) onError(error);
-
-        try {
-            const { pool, name: projectName, repository, githubUserId, serviceType: st } = params;
-
-            if (pool && projectName && githubUserId) {
-                await safeInsertDeployment(pool, {
-                    projectName,
-                    repository: repository || null,
-                    containerName: null,
-                    imageName: null,
-                    port: null,
-                    url: null,
-                    status: 'failed',
-                    serviceType: st || 'unknown',
-                    githubUserId
-                });
-            }
-        } catch (dbErr) {
-            console.error('Failed to insert failed deployment record:', dbErr.message);
-        }
-
         throw error;
     }
 }

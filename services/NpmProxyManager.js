@@ -232,6 +232,49 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
 }
 
 /**
+ * Repoint an existing Proxy Host at a new forward_port — used by
+ * redeploy-in-place (webDeployer.js): the new container is built, started,
+ * and health-checked on its own port first, then traffic is switched to it
+ * here, and only *after* that does the caller stop the old container. No
+ * window where the domain points at nothing.
+ *
+ * Returns { success, error? }. Never throws.
+ */
+async function updateProxyHost({ projectName, forwardPort, addLog = console.log }) {
+  const npmApiUrl = process.env.NPM_API_URL || '';
+  const npmEmail = process.env.NPM_EMAIL || '';
+  const npmPassword = process.env.NPM_PASSWORD || '';
+
+  const domain = `${slugifyForDomain(projectName)}.hgu.app`;
+
+  if (!npmApiUrl || !npmEmail || !npmPassword) {
+    return { success: false, error: 'NPM not configured' };
+  }
+
+  try {
+    const token = await getNpmToken(npmApiUrl, npmEmail, npmPassword);
+    const listResp = await axios.get(`${npmApiUrl}/nginx/proxy-hosts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+    const match = (listResp.data || []).find(p => p && p.domain_names && p.domain_names.includes(domain));
+    if (!match) {
+      return { success: false, error: `No Proxy Host found for ${domain}` };
+    }
+
+    await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, { forward_port: Number(forwardPort) }, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 30000
+    });
+    addLog(`✅ [NPM] ${domain} now points at port ${forwardPort}.`);
+    return { success: true };
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : (err.message || 'unknown error');
+    return { success: false, error: detail };
+  }
+}
+
+/**
  * Add a custom domain to a project's existing Proxy Host (found by its
  * default <slug>.hgu.app domain). If AUTO_SSL_ENABLED, requests a single
  * certificate covering both the default and custom domain together (a
@@ -367,6 +410,7 @@ async function removeCustomDomain({ projectName, customDomain, addLog = console.
 module.exports = {
   createProxyHost,
   deleteProxyHost,
+  updateProxyHost,
   addCustomDomain,
   removeCustomDomain,
   slugifyForDomain

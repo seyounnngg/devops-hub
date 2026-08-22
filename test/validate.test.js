@@ -5,7 +5,8 @@ const {
     assertSafeRepository,
     assertSafeBranch,
     assertSafePathSegment,
-    assertSafeDomain
+    assertSafeDomain,
+    assertSafeCommitHash
 } = require('../utils/validate');
 
 test('assertSafeProjectName accepts normal names', () => {
@@ -51,4 +52,15 @@ test('assertSafeDomain rejects protocol, paths, and injection attempts', () => {
     assert.throws(() => assertSafeDomain('myapp.com/path'));
     assert.throws(() => assertSafeDomain('myapp.com; rm -rf /'));
     assert.throws(() => assertSafeDomain(''));
+});
+
+test('assertSafeCommitHash accepts short and full hex hashes', () => {
+    assert.doesNotThrow(() => assertSafeCommitHash('ae58aff'));
+    assert.doesNotThrow(() => assertSafeCommitHash('ae58affaa307f5f934d34b7b272ff75b66984672'));
+});
+
+test('assertSafeCommitHash rejects non-hex and injection attempts', () => {
+    assert.throws(() => assertSafeCommitHash('main'));
+    assert.throws(() => assertSafeCommitHash('ae58aff; rm -rf /'));
+    assert.throws(() => assertSafeCommitHash(''));
 });

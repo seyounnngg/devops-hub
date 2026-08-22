@@ -3,9 +3,9 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const path = require('path');
 const fs = require('fs');
-const { safeInsertDeployment } = require('../utils/dbHelpers');
-const { createProxyHost } = require('./NpmProxyManager');
-const { cloneRepo } = require('../utils/gitClone');
+const { safeInsertDeployment, recordBuild } = require('../utils/dbHelpers');
+const { createProxyHost, updateProxyHost } = require('./NpmProxyManager');
+const { cloneRepo, cloneRepoAtCommit } = require('../utils/gitClone');
 const { allocatePort } = require('../utils/allocatePort');
 
 // New auto-detection modules (for Dockerfile-less Web deployments)
@@ -50,6 +50,25 @@ async function cleanupProjectDir(projectPath, addLog) {
 
 /**
  * Web Service Deployer — Web is the primary/highest-priority service type.
+ *
+ * Two modes, selected by whether `existingDeployment` (the current live row
+ * for this project) is passed in:
+ *
+ * - Create (existingDeployment absent): builds + starts a container, creates
+ *   a new Proxy Host, INSERTs a new `deployments` row.
+ *
+ * - Redeploy-in-place (existingDeployment present — manual redeploy, GitHub
+ *   webhook, or rollback via `commitOverride`): builds + starts the NEW
+ *   container on its own port and health-checks it *before* touching
+ *   anything live. Only once that passes does it repoint the existing Proxy
+ *   Host at the new port and then stop the old container — so a failed
+ *   redeploy never takes the running service down, and there's no window
+ *   where the domain points at nothing. UPDATEs the existing `deployments`
+ *   row (same id) instead of inserting a new one.
+ *
+ * Either way, a row is appended to `deployment_builds` recording the
+ * attempt (commit, image/container names, status) — that history is what
+ * powers rollback.
  */
 async function deploy(params, { addLog }) {
     const {
@@ -60,8 +79,13 @@ async function deploy(params, { addLog }) {
         githubUsername,
         pool,
         envVars = {},
-        githubUserId = null
+        githubUserId = null,
+        existingDeployment = null,
+        commitOverride = null,
+        triggeredBy = 'manual'
     } = params;
+
+    const isRedeploy = !!existingDeployment;
 
     let internalPort = params.internalPort || 80;
 
@@ -84,10 +108,19 @@ async function deploy(params, { addLog }) {
 
     const url = (PUBLIC_DOMAIN && PUBLIC_DOMAIN !== 'hgu.app') ? idealUrl : practicalUrl;
 
-    addLog(`📦 [1/6] Cloning repository (branch: ${branch})...`);
+    if (isRedeploy) {
+        addLog(`🔁 Redeploying ${projectName} (previous container: ${existingDeployment.container_name})`);
+    }
+    addLog(commitOverride
+        ? `📦 [1/6] Cloning repository at commit ${commitOverride}...`
+        : `📦 [1/6] Cloning repository (branch: ${branch})...`);
 
     try {
-        await cloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath });
+        if (commitOverride) {
+            await cloneRepoAtCommit({ githubUsername, repository, commit: commitOverride, githubToken, destPath: projectPath });
+        } else {
+            await cloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath });
+        }
         addLog('✅ [1/6] Repository cloned successfully');
 
         // === Smart Dockerfile handling (support repos without a Dockerfile) ===
@@ -142,7 +175,7 @@ async function deploy(params, { addLog }) {
             throw e;
         }
 
-        // Commit hash (traceability)
+        // Commit hash (traceability + what rollback records)
         try {
             const { stdout } = await execFileAsync('git', ['-C', projectPath, 'rev-parse', 'HEAD']);
             commitHash = stdout.trim().substring(0, 12);
@@ -177,9 +210,8 @@ async function deploy(params, { addLog }) {
             throw buildErr;
         }
 
-        // Run container
+        // Run container (on its own new port — the old one, if any, keeps serving traffic)
         addLog(`🐳 [3/6] Starting container (internal port ${internalPort} → external ${externalPort})...`);
-        addLog(`🌐 Service is now accessible at: ${practicalUrl}`);
 
         const envArgs = [];
         for (const [key, value] of Object.entries(envVars || {})) {
@@ -243,36 +275,84 @@ async function deploy(params, { addLog }) {
                 crashLogs = stdout;
             } catch (_) {}
             if (crashLogs) crashLogs.trim().split('\n').forEach(l => addLog(`   ${l}`));
+            if (isRedeploy) {
+                addLog('   The previous version is still running — nothing was switched over.');
+            }
             throw new Error(`Container failed health check (status: ${healthStatus})`);
         }
 
-        // Proxy Host (only after the container is confirmed healthy/running)
-        let finalUrl = url;
-        try {
-            const proxyResult = await createProxyHost({ projectName, forwardPort: externalPort, addLog });
-            if (proxyResult.success && proxyResult.url) {
-                finalUrl = proxyResult.url;
-            } else if (proxyResult.error) {
-                addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. Using port URL.`);
+        // From here on the new container is confirmed healthy — safe to switch traffic to it.
+        let finalUrl;
+        const finalEnvVars = Object.keys(envVars || {}).length > 0 ? envVars : null;
+
+        if (isRedeploy) {
+            finalUrl = existingDeployment.url;
+
+            const switchResult = await updateProxyHost({ projectName, forwardPort: externalPort, addLog });
+            if (!switchResult.success) {
+                addLog(`⚠️ [NPM] Could not update the existing Proxy Host (${switchResult.error}). Attempting to create one...`);
+                try {
+                    const createResult = await createProxyHost({ projectName, forwardPort: externalPort, addLog });
+                    if (createResult.success && createResult.url) finalUrl = createResult.url;
+                } catch (proxyErr) {
+                    addLog(`⚠️ [NPM] Unexpected error creating Proxy Host: ${proxyErr.message}`);
+                }
             }
-        } catch (proxyErr) {
-            addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
+
+            addLog(`🧹 [5/6] Stopping previous container (${existingDeployment.container_name})...`);
+            await execFileAsync('docker', ['stop', existingDeployment.container_name]).catch(() => {});
+            await execFileAsync('docker', ['rm', existingDeployment.container_name]).catch(() => {});
+            if (existingDeployment.image_name) {
+                await execFileAsync('docker', ['rmi', existingDeployment.image_name]).catch(() => {});
+            }
+
+            await pool.execute(
+                `UPDATE deployments SET container_name = ?, image_name = ?, port = ?, url = ?, status = 'running', env_vars = ? WHERE id = ?`,
+                [containerName, imageName, externalPort, finalUrl, finalEnvVars ? JSON.stringify(finalEnvVars) : existingDeployment.env_vars, existingDeployment.id]
+            );
+
+            addLog('✅ [5/6] Traffic switched to the new container; previous one removed');
+        } else {
+            finalUrl = url;
+            addLog(`🌐 Service is now accessible at: ${practicalUrl}`);
+            try {
+                const proxyResult = await createProxyHost({ projectName, forwardPort: externalPort, addLog });
+                if (proxyResult.success && proxyResult.url) {
+                    finalUrl = proxyResult.url;
+                } else if (proxyResult.error) {
+                    addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. Using port URL.`);
+                }
+            } catch (proxyErr) {
+                addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
+            }
         }
 
-        await safeInsertDeployment(pool, {
-            projectName,
-            repository,
-            containerName,
+        const deploymentRowId = isRedeploy
+            ? existingDeployment.id
+            : await safeInsertDeployment(pool, {
+                projectName,
+                repository,
+                branch,
+                containerName,
+                imageName,
+                port: externalPort,
+                url: finalUrl,
+                status: 'running',
+                serviceType: 'web',
+                envVars: finalEnvVars,
+                githubUserId
+            });
+
+        await recordBuild(pool, {
+            deploymentId: deploymentRowId,
+            commitHash,
             imageName,
-            port: externalPort,
-            url: finalUrl,
-            status: 'running',
-            serviceType: 'web',
-            envVars: Object.keys(envVars || {}).length > 0 ? envVars : null,
-            githubUserId
+            containerName,
+            status: 'success',
+            triggeredBy
         });
 
-        addLog('✅ [5/6] Deployment recorded in database');
+        addLog(isRedeploy ? '✅ [5/6] Deployment updated in database' : '✅ [5/6] Deployment recorded in database');
 
         if (dockerfilePath && dockerfilePath.includes('templates')) {
             addLog('ℹ️  Note: This deployment used an auto-generated Dockerfile (no Dockerfile was found in your repo).');
@@ -280,7 +360,7 @@ async function deploy(params, { addLog }) {
 
         addLog('✅ [6/6] Web service is now live');
         addLog(`🌐 Final access URL: ${finalUrl}`);
-        if (!PUBLIC_DOMAIN || PUBLIC_DOMAIN === 'hgu.app') {
+        if (!isRedeploy && (!PUBLIC_DOMAIN || PUBLIC_DOMAIN === 'hgu.app')) {
             addLog('   (Subdomain may not work in lab environments without DNS setup — use the port URL above.)');
         }
 
@@ -294,14 +374,15 @@ async function deploy(params, { addLog }) {
             internalPort,
             commitHash,
             healthStatus,
-            deploymentId,
+            deploymentId: deploymentRowId,
             failureStage: null
         };
 
     } catch (error) {
+        // The new container never went live if we get here — the old one (if any) was never touched.
         if (containerStarted && containerName) {
             try {
-                addLog('🧹 Cleaning up failed Web container (port will be released)...');
+                addLog('🧹 Cleaning up failed container (port will be released)...');
                 await execFileAsync('docker', ['stop', containerName]).catch(() => {});
                 await execFileAsync('docker', ['rm', containerName]).catch(() => {});
             } catch (cleanupErr) {
@@ -314,16 +395,28 @@ async function deploy(params, { addLog }) {
         addLog(`❌ [Final] Deployment Failed at stage: ${failureStage || 'unknown'}. ${error.message}`);
 
         try {
-            await safeInsertDeployment(pool, {
-                projectName,
-                repository,
-                containerName: containerName || `failed-${deploymentId}`,
-                imageName: imageName || `failed-${deploymentId}`,
-                port: null,
-                url: 'Deployment failed',
+            const failedDeploymentId = isRedeploy
+                ? existingDeployment.id
+                : await safeInsertDeployment(pool, {
+                    projectName,
+                    repository,
+                    branch,
+                    containerName: containerName || `failed-${deploymentId}`,
+                    imageName: imageName || `failed-${deploymentId}`,
+                    port: null,
+                    url: 'Deployment failed',
+                    status: 'failed',
+                    serviceType: 'web',
+                    githubUserId
+                });
+
+            await recordBuild(pool, {
+                deploymentId: failedDeploymentId,
+                commitHash,
+                imageName,
+                containerName,
                 status: 'failed',
-                serviceType: 'web',
-                githubUserId
+                triggeredBy
             });
         } catch (dbErr) {
             console.error('Failed to record failure in DB:', dbErr.message);

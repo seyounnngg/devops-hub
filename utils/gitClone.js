@@ -10,7 +10,30 @@
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
-const { assertSafeRepository, assertSafeBranch } = require('./validate');
+const { assertSafeRepository, assertSafeBranch, assertSafeCommitHash } = require('./validate');
+
+/**
+ * Clone at a specific commit (for rollback). Requires a full clone — a
+ * shallow one won't have the history to check out an arbitrary past commit.
+ * Slower than the normal branch-HEAD clone, so only used for rollback.
+ */
+async function cloneRepoAtCommit({ githubUsername, repository, commit, githubToken, destPath, timeout = 180000 }) {
+    assertSafeRepository(repository);
+    assertSafeCommitHash(commit);
+
+    const repoUrl = `https://github.com/${githubUsername}/${repository}.git`;
+    const credentialHelper = '!f() { echo username=x-access-token; echo password=$GIT_TOKEN; }; f';
+    const env = { ...process.env, GIT_TOKEN: githubToken };
+
+    await execFileAsync('git', [
+        '-c', `credential.helper=${credentialHelper}`,
+        'clone',
+        repoUrl,
+        destPath
+    ], { timeout, env });
+
+    await execFileAsync('git', ['-C', destPath, 'checkout', commit], { timeout: 30000, env });
+}
 
 async function cloneRepo({ githubUsername, repository, branch, githubToken, destPath, timeout = 120000 }) {
     assertSafeRepository(repository);
@@ -35,4 +58,4 @@ async function cloneRepo({ githubUsername, repository, branch, githubToken, dest
     });
 }
 
-module.exports = { cloneRepo };
+module.exports = { cloneRepo, cloneRepoAtCommit };
