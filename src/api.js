@@ -96,6 +96,18 @@ export function updateEnvVars(id, envVars) {
   });
 }
 
+export function addCustomDomain(id, customDomain) {
+  return fetchJson(`/deployments/${id}/domain`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customDomain }),
+  });
+}
+
+export function removeCustomDomain(id) {
+  return fetchJson(`/deployments/${id}/domain`, { method: 'DELETE' });
+}
+
 export function deleteAllMyData() {
   return fetchJson('/me', { method: 'DELETE' });
 }

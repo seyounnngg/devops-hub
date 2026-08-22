@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars } from "./api";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars, addCustomDomain, removeCustomDomain } from "./api";
 
 function DeploymentDetail() {
 
@@ -15,6 +15,10 @@ function DeploymentDetail() {
     const [envVarsLoadedFor, setEnvVarsLoadedFor] = useState(null);
     const [savingEnvVars, setSavingEnvVars] = useState(false);
     const [envSaveMessage, setEnvSaveMessage] = useState('');
+
+    const [domainInput, setDomainInput] = useState('');
+    const [domainBusy, setDomainBusy] = useState(false);
+    const [domainMessage, setDomainMessage] = useState('');
 
     const projectName = localStorage.getItem("currentProject");
 
@@ -95,6 +99,36 @@ function DeploymentDetail() {
             setEnvSaveMessage('Failed to save.');
         } finally {
             setSavingEnvVars(false);
+        }
+    }
+
+    async function handleConnectDomain() {
+        if (!deployment?.id || !domainInput.trim()) return;
+        setDomainBusy(true);
+        setDomainMessage('');
+        try {
+            const result = await addCustomDomain(deployment.id, domainInput.trim());
+            setDeployment(d => ({ ...d, custom_domain: domainInput.trim() }));
+            setDomainInput('');
+            setDomainMessage(result.url?.startsWith('https') ? 'Connected with SSL.' : 'Connected over HTTP (SSL not attached — check DNS and try again).');
+        } catch (e) {
+            setDomainMessage(e.message || 'Failed to connect domain. Make sure its DNS points to this server.');
+        } finally {
+            setDomainBusy(false);
+        }
+    }
+
+    async function handleRemoveDomain() {
+        if (!deployment?.id) return;
+        setDomainBusy(true);
+        setDomainMessage('');
+        try {
+            await removeCustomDomain(deployment.id);
+            setDeployment(d => ({ ...d, custom_domain: null }));
+        } catch (e) {
+            setDomainMessage(e.message || 'Failed to remove domain.');
+        } finally {
+            setDomainBusy(false);
         }
     }
 
@@ -295,6 +329,56 @@ function DeploymentDetail() {
                         </button>
                         {envSaveMessage && <span className="text-xs text-zinc-400">{envSaveMessage}</span>}
                     </div>
+                </div>
+            )}
+
+            {/* Custom Domain (Web only) */}
+            {deployment && deployment.service_type !== 'apk' && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+                    <div className="font-semibold tracking-tight mb-1">Custom Domain</div>
+
+                    {deployment.custom_domain ? (
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <a
+                                href={`https://${deployment.custom_domain}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sm font-mono text-white hover:text-blue-400 break-all"
+                            >
+                                {deployment.custom_domain}
+                            </a>
+                            <button
+                                onClick={handleRemoveDomain}
+                                disabled={domainBusy}
+                                className="px-4 py-1.5 text-sm font-medium bg-red-500/10 hover:bg-red-500/15 text-red-400 rounded-xl transition disabled:opacity-60"
+                            >
+                                Remove
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <p className="text-xs text-zinc-500 mb-4">
+                                Point a DNS A record for your domain to this server's IP first, then connect it here.
+                            </p>
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="myapp.com"
+                                    value={domainInput}
+                                    onChange={(e) => setDomainInput(e.target.value)}
+                                    className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                />
+                                <button
+                                    onClick={handleConnectDomain}
+                                    disabled={domainBusy || !domainInput.trim()}
+                                    className="px-5 py-2 text-sm font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition disabled:opacity-60"
+                                >
+                                    {domainBusy ? 'Connecting...' : 'Connect'}
+                                </button>
+                            </div>
+                        </>
+                    )}
+                    {domainMessage && <p className="text-xs text-zinc-400 mt-3">{domainMessage}</p>}
                 </div>
             )}
 
