@@ -13,13 +13,31 @@ async function safeInsertDeployment(pool, values) {
         status,
         serviceType = 'web',
         apkUrl = null,
+        aabUrl = null,
         githubUserId = null
     } = values;
+
+    // Newest insert (adds aab_url on top of the modern columns below)
+    if (aabUrl !== null) {
+        try {
+            await pool.execute(`
+                INSERT INTO deployments
+                (github_user_id, project_name, repository_name, container_name, image_name, port, url, status, service_type, apk_url, aab_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [githubUserId, projectName, repository, containerName, imageName, port, url, status, serviceType, apkUrl, aabUrl]);
+            return;
+        } catch (err) {
+            if (err.code !== 'ER_BAD_FIELD_ERROR') {
+                throw err;
+            }
+            console.warn('[DB] aab_url column missing, falling back to insert without it...');
+        }
+    }
 
     // Full modern insert (includes per-user isolation + apk support)
     try {
         await pool.execute(`
-            INSERT INTO deployments 
+            INSERT INTO deployments
             (github_user_id, project_name, repository_name, container_name, image_name, port, url, status, service_type, apk_url)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [githubUserId, projectName, repository, containerName, imageName, port, url, status, serviceType, apkUrl]);

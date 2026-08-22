@@ -246,6 +246,14 @@ async function removeDeploymentResources(deployment) {
             console.error('APK file cleanup error (non-fatal):', e.message);
         }
     }
+    if (deployment.aab_url) {
+        try {
+            const aabPath = path.join('/tmp/apks', path.basename(deployment.aab_url));
+            if (fs.existsSync(aabPath)) fs.unlinkSync(aabPath);
+        } catch (e) {
+            console.error('AAB file cleanup error (non-fatal):', e.message);
+        }
+    }
 }
 
 app.get('/', (req, res) => {
@@ -636,8 +644,8 @@ app.get('/deployments/:name/logs', async (req, res) => {
     res.json(toReturn);
 });
 
-// Authenticated APK download (replaces the old unauthenticated /apks static route)
-app.get('/deployments/:id/apk', async (req, res) => {
+// Authenticated APK/AAB download (replaces the old unauthenticated /apks static route)
+async function downloadMobileArtifact(req, res, { column, label }) {
     try {
         const user = await getAuthenticatedUser(req);
         const [rows] = await pool.execute(
@@ -645,24 +653,27 @@ app.get('/deployments/:id/apk', async (req, res) => {
             [req.params.id, user.id]
         );
 
-        if (rows.length === 0 || !rows[0].apk_url) {
-            return res.status(404).json({ error: 'APK not found' });
+        if (rows.length === 0 || !rows[0][column]) {
+            return res.status(404).json({ error: `${label} not found` });
         }
 
-        const apkPath = path.join('/tmp/apks', path.basename(rows[0].apk_url));
-        if (!fs.existsSync(apkPath)) {
-            return res.status(404).json({ error: 'APK file no longer available' });
+        const filePath = path.join('/tmp/apks', path.basename(rows[0][column]));
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: `${label} file no longer available` });
         }
 
-        res.download(apkPath);
+        res.download(filePath);
     } catch (error) {
         if (error.status === 401) {
             return res.status(401).json({ error: 'Authentication required' });
         }
         console.error(error);
-        res.status(500).json({ error: 'Failed to download APK' });
+        res.status(500).json({ error: `Failed to download ${label}` });
     }
-});
+}
+
+app.get('/deployments/:id/apk', (req, res) => downloadMobileArtifact(req, res, { column: 'apk_url', label: 'APK' }));
+app.get('/deployments/:id/aab', (req, res) => downloadMobileArtifact(req, res, { column: 'aab_url', label: 'AAB' }));
 
 app.post('/deployments/:id/stop', async (req, res) => {
     try {

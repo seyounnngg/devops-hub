@@ -1,10 +1,9 @@
-const { execFile, spawn } = require('child_process');
-const { promisify } = require('util');
-const execFileAsync = promisify(execFile);
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { safeInsertDeployment } = require('../utils/dbHelpers');
 const { assertSafeRepository, assertSafeBranch, assertSafePathSegment } = require('../utils/validate');
+const { getOrCreateSigningKey, BUILD_IMAGE, KEYSTORE_DIR } = require('../utils/signingKey');
 
 const BUILD_MEM_LIMIT = process.env.DEPLOY_BUILD_MEM_LIMIT || '3g';
 const BUILD_CPU_LIMIT = process.env.DEPLOY_BUILD_CPU_LIMIT || '2';
@@ -73,8 +72,109 @@ function streamingCloneRepo({ githubUsername, repository, branch, githubToken, d
     });
 }
 
+/** Detects Flutter / React Native / plain Android(Gradle), in that priority
+ *  order (a Flutter or RN project also contains a nested android/build.gradle,
+ *  so the more specific checks must run first). */
+function detectMobileProject(projectPath) {
+    const pubspecPath = findFileRecursive(projectPath, 'pubspec.yaml');
+    if (pubspecPath) {
+        return { type: 'flutter', root: path.dirname(pubspecPath) };
+    }
+
+    const packageJsonPath = findFileRecursive(projectPath, 'package.json');
+    if (packageJsonPath) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+            const rnRoot = path.dirname(packageJsonPath);
+            if (deps['react-native'] && fs.existsSync(path.join(rnRoot, 'android', 'build.gradle'))) {
+                return { type: 'react-native', root: rnRoot };
+            }
+        } catch (e) {
+            // malformed package.json — fall through to plain Gradle detection
+        }
+    }
+
+    const gradlePath = findFileRecursive(projectPath, 'build.gradle');
+    if (gradlePath) {
+        return { type: 'android', root: path.dirname(gradlePath) };
+    }
+
+    return null;
+}
+
+/** Shell script run inside BUILD_IMAGE with the project root mounted at /app
+ *  and the keystore directory mounted read-only at /keystores. Builds an APK
+ *  + AAB, then re-signs both with the project's managed key. Emits
+ *  DEVOPSHUB_* marker lines the host parses out of the captured output. */
+function buildAndSignScript({ type, keystoreFile, alias }) {
+    let buildCmds;
+
+    if (type === 'flutter') {
+        buildCmds = `
+flutter config --no-analytics --suppress-analytics >/dev/null 2>&1 || true
+yes | flutter doctor --android-licenses >/dev/null 2>&1 || true
+flutter precache --android
+flutter pub get
+flutter build apk --release --no-pub
+flutter build appbundle --release --no-pub
+`.trim();
+    } else if (type === 'react-native') {
+        buildCmds = `
+apt-get update -qq >/dev/null 2>&1
+apt-get install -y -qq nodejs npm >/dev/null 2>&1
+npm install --no-audit --no-fund
+cd android
+./gradlew assembleRelease bundleRelease --no-daemon
+cd ..
+`.trim();
+    } else {
+        buildCmds = `./gradlew assembleRelease bundleRelease --no-daemon`;
+    }
+
+    return `set -e
+cd /app
+${buildCmds}
+
+APK=$(find . -path '*/outputs/*' -name '*.apk' | grep -v -- '-unsigned' | head -1)
+if [ -z "$APK" ]; then
+  APK=$(find . -path '*/outputs/*' -name '*.apk' | head -1)
+fi
+AAB=$(find . -path '*/outputs/*' -name '*.aab' | head -1)
+echo "DEVOPSHUB_FOUND_APK=$APK"
+echo "DEVOPSHUB_FOUND_AAB=$AAB"
+
+BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)
+
+if [ -n "$APK" ]; then
+  "\${BT}zipalign" -f -v 4 "$APK" /tmp/aligned.apk \
+    && "\${BT}apksigner" sign --ks /keystores/${keystoreFile} --ks-pass env:KS_STORE_PW --key-pass env:KS_KEY_PW --ks-key-alias ${alias} --out /tmp/signed.apk /tmp/aligned.apk \
+    && "\${BT}apksigner" verify /tmp/signed.apk \
+    && cp /tmp/signed.apk "\${APK%.apk}-devopshub-signed.apk" \
+    && echo "DEVOPSHUB_SIGNED_APK=\${APK%.apk}-devopshub-signed.apk" \
+    || echo "DEVOPSHUB_SIGN_APK_FAILED=1"
+fi
+
+if [ -n "$AAB" ]; then
+  cp "$AAB" /tmp/signed.aab \
+    && jarsigner -storepass:env KS_STORE_PW -keypass:env KS_KEY_PW -digestalg SHA-256 -sigalg SHA256withRSA -keystore /keystores/${keystoreFile} /tmp/signed.aab ${alias} \
+    && jarsigner -verify /tmp/signed.aab \
+    && cp /tmp/signed.aab "\${AAB%.aab}-devopshub-signed.aab" \
+    && echo "DEVOPSHUB_SIGNED_AAB=\${AAB%.aab}-devopshub-signed.aab" \
+    || echo "DEVOPSHUB_SIGN_AAB_FAILED=1"
+fi
+`;
+}
+
+function parseMarker(output, key) {
+    const match = output.match(new RegExp(`^${key}=(.*)$`, 'm'));
+    return match ? match[1].trim() : null;
+}
+
 /**
- * APK Builder — supports Flutter and basic Android (Gradle) projects.
+ * Mobile app builder — Flutter, plain Android (Gradle), and React Native.
+ * Produces a signed release APK and AAB, both signed with a key generated
+ * once per project and reused for every later build of that project.
  */
 async function build(params, { addLog }) {
     const {
@@ -87,8 +187,8 @@ async function build(params, { addLog }) {
         githubUserId = null
     } = params;
 
-    addLog('📱 Starting APK Build...');
-    addLog('📦 Cloning repository for APK build...');
+    addLog('📱 Starting mobile app build...');
+    addLog('📦 Cloning repository...');
 
     const deploymentId = Date.now();
     const projectPath = `/tmp/apk-builds/${projectName}-${deploymentId}`;
@@ -101,151 +201,123 @@ async function build(params, { addLog }) {
 
     try {
         await streamingCloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath, addLog });
+        addLog('✅ Repository cloned successfully');
 
-        try {
-            const contents = fs.readdirSync(projectPath);
-            addLog(`DEBUG: Directory contents after clone: ${contents.length > 0 ? contents.join(', ') : '(empty)'}`);
-        } catch (e) {
-            addLog('DEBUG: Could not read cloned directory');
+        addLog('🔍 Detecting project type...');
+        const detection = detectMobileProject(projectPath);
+
+        if (!detection) {
+            addLog('❌ pubspec.yaml, build.gradle, or a React Native package.json could not be found.');
+            addLog('   Supported: Flutter, React Native, and plain Android (Gradle) projects.');
+            throw new Error('Not a recognized Flutter, React Native, or Android project.');
         }
 
-        const pubspecFoundPath = findFileRecursive(projectPath, 'pubspec.yaml');
+        assertSafePathSegment(detection.root, 'project path');
+        addLog(`✅ Detected ${detection.type} project at: ${detection.root}`);
 
-        if (!pubspecFoundPath) {
-            addLog('⚠️ Git clone reported success, but no pubspec.yaml was found anywhere in the cloned directory.');
-            addLog('This is a very strong sign that your GitHub token does not have permission to clone this private repository.');
-            addLog('→ Please go to GitHub → Settings → Developer settings → Personal access tokens');
-            addLog('→ Make sure it is a Classic token with the "repo" scope fully checked.');
-            addLog('❌ [Final] Deployment Failed: pubspec.yaml 파일을 찾을 수 없습니다.');
-            addLog('   현재 APK Build는 Flutter 프로젝트만 지원합니다.');
-            throw new Error('No Flutter project found (pubspec.yaml missing). Check if this is a valid Flutter project and token scopes.');
+        addLog(`🐳 Ensuring build image is ready (${BUILD_IMAGE})...`);
+        await new Promise((resolve) => {
+            const child = spawn('docker', ['pull', BUILD_IMAGE], { stdio: ['ignore', 'pipe', 'pipe'] });
+            child.stdout.on('data', (d) => d.toString().trim().split('\n').forEach(l => { if (l.trim()) addLog(`   [pull] ${l.trim()}`); }));
+            child.stderr.on('data', (d) => d.toString().trim().split('\n').forEach(l => { if (l.trim()) addLog(`   [pull] ${l.trim()}`); }));
+            child.on('close', () => resolve());
+            child.on('error', (err) => { addLog(`⚠️ Pull error: ${err.message} (continuing with cached image if available)`); resolve(); });
+        });
+
+        addLog('🔑 Preparing release signing key for this project...');
+        const signingKey = await getOrCreateSigningKey(pool, { githubUserId, projectName });
+        addLog(signingKey.reused
+            ? '✅ Reusing existing signing key (consistent with previous builds of this project).'
+            : '✅ Generated a new release signing key for this project.');
+
+        const keystoreFile = path.basename(signingKey.keystorePath);
+        const script = buildAndSignScript({ type: detection.type, keystoreFile, alias: signingKey.alias });
+
+        const dockerArgs = [
+            'run', '--rm',
+            '--memory', BUILD_MEM_LIMIT,
+            '--cpus', BUILD_CPU_LIMIT,
+            '-v', `${detection.root}:/app`,
+            '-v', `${KEYSTORE_DIR}:/keystores:ro`,
+            '-e', 'KS_STORE_PW',
+            '-e', 'KS_KEY_PW'
+        ];
+
+        if (detection.type === 'flutter') {
+            dockerArgs.push(
+                '-v', 'flutter-gradle-cache:/root/.gradle',
+                '-v', 'flutter-pub-cache:/root/.pub-cache',
+                '-v', 'flutter-cache:/root/.cache',
+                '-e', 'GRADLE_USER_HOME=/root/.gradle',
+                '-e', 'GRADLE_OPTS=-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true'
+            );
         }
 
-        addLog('✅ Repository cloned successfully with project files');
+        dockerArgs.push('-w', '/app', BUILD_IMAGE, 'sh', '-c', script);
 
-        // === Improved Flutter / Android project root detection ===
-        addLog('🔍 Detecting project root...');
+        addLog('🔨 Starting build (typically 1-5 minutes with cache)...');
 
-        const pubspecPath = findFileRecursive(projectPath, 'pubspec.yaml');
-        const gradlePath = findFileRecursive(projectPath, 'build.gradle');
-
-        let buildCommand = '';
-        let artifactPath = '';
-        let flutterProjectRoot = null;
-
-        const useFlutterImage = 'ghcr.io/cirruslabs/flutter:stable';
-
-        if (pubspecPath) {
-            flutterProjectRoot = path.dirname(pubspecPath);
-            // Defense in depth: the build command below still runs through `sh -c` for the Flutter
-            // toolchain itself, so make sure nothing shell-meaningful made it into this path (it is
-            // derived from directory names inside the user's own cloned repo).
-            assertSafePathSegment(flutterProjectRoot, 'project path');
-            addLog(`✅ Flutter project root detected: ${flutterProjectRoot}`);
-
-            addLog(`🐳 Ensuring Flutter build image is ready (${useFlutterImage})...`);
-
-            await new Promise((resolve) => {
-                const child = spawn('docker', ['pull', useFlutterImage], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-                child.stdout.on('data', (data) => {
-                    data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(`   [pull] ${line.trim()}`); });
-                });
-                child.stderr.on('data', (data) => {
-                    data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(`   [pull] ${line.trim()}`); });
-                });
-
-                child.on('close', (code) => {
-                    if (code === 0) addLog(`✅ Flutter image is ready`);
-                    else addLog(`⚠️ docker pull exited with code ${code} (may still work if image is cached)`);
-                    resolve();
-                });
-                child.on('error', (err) => {
-                    addLog(`⚠️ Pull error: ${err.message} (continuing with cached image if available)`);
-                    resolve();
-                });
+        const buildOutput = await new Promise((resolve, reject) => {
+            const child = spawn('docker', dockerArgs, {
+                stdio: ['ignore', 'pipe', 'pipe'],
+                env: { ...process.env, KS_STORE_PW: signingKey.storePassword, KS_KEY_PW: signingKey.keyPassword }
             });
 
-            buildCommand = `docker run --rm \
-              --memory ${BUILD_MEM_LIMIT} --cpus ${BUILD_CPU_LIMIT} \
-              -v "${flutterProjectRoot}:/app" \
-              -v flutter-gradle-cache:/root/.gradle \
-              -v flutter-pub-cache:/root/.pub-cache \
-              -v flutter-cache:/root/.cache \
-              -e GRADLE_USER_HOME=/root/.gradle \
-              -e GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true" \
-              -w /app ${useFlutterImage} \
-              sh -c '
-                cat > /tmp/build.sh << "EOL"
-flutter config --no-analytics --suppress-analytics >/dev/null 2>&1 || true
-sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null 2>&1 || true
-yes | flutter doctor --android-licenses >/dev/null 2>&1 || true
-flutter precache --android
-flutter pub get
-flutter build apk --release --no-pub
-EOL
-                chmod +x /tmp/build.sh
-                /tmp/build.sh
-              '`;
-
-            artifactPath = `${flutterProjectRoot}/build/app/outputs/flutter-apk/app-release.apk`;
-
-        } else if (gradlePath) {
-            const androidProjectRoot = path.dirname(gradlePath);
-            assertSafePathSegment(androidProjectRoot, 'project path');
-            addLog(`✅ Android project root detected: ${androidProjectRoot}`);
-
-            buildCommand = `docker run --rm --memory ${BUILD_MEM_LIMIT} --cpus ${BUILD_CPU_LIMIT} -v "${androidProjectRoot}:/app" -w /app openjdk:17-jdk sh -c "./gradlew assembleRelease"`;
-            artifactPath = `${androidProjectRoot}/app/build/outputs/apk/release/app-release.apk`;
-
-        } else {
-            addLog('❌ pubspec.yaml 또는 build.gradle 파일을 찾을 수 없습니다.');
-            addLog('   현재 APK Build는 Flutter 프로젝트와 기본 Android 프로젝트만 지원합니다.');
-            throw new Error('Not a valid Flutter or Android project.');
-        }
-
-        addLog('🔨 Starting APK build (typically 1-5 minutes with cache)...');
-
-        await new Promise((resolve, reject) => {
-            const child = spawn('/bin/sh', ['-c', buildCommand], { stdio: ['ignore', 'pipe', 'pipe'] });
-
+            let combined = '';
             child.stdout.on('data', (data) => {
-                data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
+                const text = data.toString();
+                combined += text;
+                text.trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
             });
             child.stderr.on('data', (data) => {
-                data.toString().trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
+                const text = data.toString();
+                combined += text;
+                text.trim().split('\n').forEach(line => { if (line.trim()) addLog(line.trim()); });
             });
 
             child.on('close', (code) => {
-                if (code === 0) {
-                    addLog('✅ APK build completed');
-                    resolve();
-                } else {
-                    reject(new Error(`APK build exited with code ${code}`));
-                }
+                if (code === 0) resolve(combined);
+                else reject(new Error(`Build exited with code ${code}`));
             });
             child.on('error', reject);
         });
 
-        let downloadUrl = null;
-        try {
-            if (!fs.existsSync(artifactPath)) throw new Error('artifact not found');
+        addLog('✅ Build completed');
 
-            await fs.promises.mkdir('/tmp/apks', { recursive: true });
+        const signedApkRel = parseMarker(buildOutput, 'DEVOPSHUB_SIGNED_APK');
+        const signedAabRel = parseMarker(buildOutput, 'DEVOPSHUB_SIGNED_AAB');
+        const foundApkRel = parseMarker(buildOutput, 'DEVOPSHUB_FOUND_APK');
+        const foundAabRel = parseMarker(buildOutput, 'DEVOPSHUB_FOUND_AAB');
 
-            const fileName = `${projectName}-${deploymentId}.apk`;
-            const finalApkPath = `/tmp/apks/${fileName}`;
+        if (parseMarker(buildOutput, 'DEVOPSHUB_SIGN_APK_FAILED')) {
+            addLog('⚠️ APK signing failed — falling back to the unsigned/default-signed build output.');
+        }
+        if (parseMarker(buildOutput, 'DEVOPSHUB_SIGN_AAB_FAILED')) {
+            addLog('⚠️ AAB signing failed — falling back to the unsigned/default-signed build output.');
+        }
 
-            await fs.promises.copyFile(artifactPath, finalApkPath);
+        const finalApkRel = signedApkRel || foundApkRel;
+        const finalAabRel = signedAabRel || foundAabRel;
 
-            // Metadata only — actual downloads go through the authenticated
-            // GET /deployments/:id/apk route (server.js), not this path directly.
-            downloadUrl = `/apks/${fileName}`;
-            addLog(`✅ APK build succeeded — download it from the deployment detail page.`);
-        } catch (err) {
-            addLog('❌ APK artifact not found after build.');
-            console.error('APK copy error:', err);
-            downloadUrl = null;
+        if (!finalApkRel) {
+            throw new Error('Build finished but no APK artifact was found in the outputs directory.');
+        }
+
+        await fs.promises.mkdir('/tmp/apks', { recursive: true });
+
+        const apkFileName = `${projectName}-${deploymentId}.apk`;
+        await fs.promises.copyFile(path.join(detection.root, finalApkRel), `/tmp/apks/${apkFileName}`);
+        const apkUrl = `/apks/${apkFileName}`;
+        addLog(`✅ APK ready${signedApkRel ? ' (signed)' : ' (unsigned fallback)'}`);
+
+        let aabUrl = null;
+        if (finalAabRel) {
+            const aabFileName = `${projectName}-${deploymentId}.aab`;
+            await fs.promises.copyFile(path.join(detection.root, finalAabRel), `/tmp/apks/${aabFileName}`);
+            aabUrl = `/apks/${aabFileName}`;
+            addLog(`✅ AAB ready${signedAabRel ? ' (signed)' : ' (unsigned fallback)'} — for Play Store upload`);
+        } else {
+            addLog('ℹ️ No AAB artifact was produced for this project type.');
         }
 
         await safeInsertDeployment(pool, {
@@ -254,24 +326,41 @@ EOL
             containerName: `apk-build-${deploymentId}`,
             imageName: `apk-image-${deploymentId}`,
             port: null,
-            url: downloadUrl || 'Build failed',
-            status: downloadUrl ? 'completed' : 'failed',
+            url: apkUrl,
+            status: 'completed',
             serviceType: 'apk',
-            apkUrl: downloadUrl,
+            apkUrl,
+            aabUrl,
             githubUserId
         });
 
         return {
-            success: !!downloadUrl,
+            success: true,
             serviceType: 'apk',
-            downloadUrl,
-            message: downloadUrl
-                ? 'APK build succeeded'
-                : 'APK build failed. Check logs for details.'
+            downloadUrl: apkUrl,
+            aabUrl,
+            message: 'Build succeeded'
         };
 
     } catch (error) {
-        addLog(`❌ APK build process error: ${error.message}`);
+        addLog(`❌ Mobile app build failed: ${error.message}`);
+
+        try {
+            await safeInsertDeployment(pool, {
+                projectName,
+                repository,
+                containerName: `apk-build-${deploymentId}`,
+                imageName: `apk-image-${deploymentId}`,
+                port: null,
+                url: 'Build failed',
+                status: 'failed',
+                serviceType: 'apk',
+                githubUserId
+            });
+        } catch (dbErr) {
+            console.error('Failed to record APK build failure:', dbErr.message);
+        }
+
         throw error;
     } finally {
         try {
