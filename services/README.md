@@ -29,14 +29,14 @@ restrictions) rather than restored as-is.
 
 ## Database Schema
 
-The code expects these columns:
-- `deployments.service_type`
-- `deployments.apk_url`
-- `deployments.github_user_id` (BIGINT) — per-user isolation
-- `user_sessions.github_access_token` — GitHub OAuth token, kept server-side only (see `utils/add_github_access_token_column.js`)
-- `deployment_logs.github_user_id` — per-user log isolation (see `utils/add_github_user_id_to_deployment_logs.js`)
-- `port_counter` — atomic external-port allocation (see `utils/create_port_counter_table.js`)
-- `deployments.aab_url` — signed Android App Bundle path (see `utils/add_aab_url_column.js`)
-- `apk_signing_keys` — per-project release keystore (see `utils/create_apk_signing_keys_table.js`)
+Schema changes live in `migrations/` (see `utils/migrate.js` — a small tracked runner, not a full
+ORM-backed framework). Run `npm run migrate` against the real DB before deploying code that depends on a
+new migration; `npm run migrate:status` lists applied vs. pending without changing anything.
 
-Run the migration scripts in `utils/` once against the real DB (see each file's header comment for the exact command). These are ad-hoc, idempotent scripts, not a full migration framework — adopting one (Knex/Prisma Migrate) is a recommended follow-up, not done here.
+Current schema additions beyond the original `deployments`/`user_sessions` tables:
+- `deployments.service_type`, `deployments.github_user_id` (per-user isolation)
+- `deployments.apk_url`, `deployments.aab_url` — signed mobile build artifacts
+- `user_sessions.github_access_token` — GitHub OAuth token, kept server-side only
+- `deployment_logs.github_user_id` — per-user log isolation
+- `port_counter` — atomic external-port allocation
+- `apk_signing_keys` — per-project release keystore

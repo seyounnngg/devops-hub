@@ -14,25 +14,29 @@ async function safeInsertDeployment(pool, values) {
         serviceType = 'web',
         apkUrl = null,
         aabUrl = null,
+        envVars = null,
         githubUserId = null
     } = values;
 
-    // Newest insert (adds aab_url on top of the modern columns below)
-    if (aabUrl !== null) {
-        try {
-            await pool.execute(`
-                INSERT INTO deployments
-                (github_user_id, project_name, repository_name, container_name, image_name, port, url, status, service_type, apk_url, aab_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [githubUserId, projectName, repository, containerName, imageName, port, url, status, serviceType, apkUrl, aabUrl]);
-            return;
-        } catch (err) {
-            if (err.code !== 'ER_BAD_FIELD_ERROR') {
-                throw err;
-            }
-            console.warn('[DB] aab_url column missing, falling back to insert without it...');
+    // Current schema (relies on all migrations in migrations/ having been applied —
+    // run `npm run migrate` before deploying code that expects a new column).
+    try {
+        await pool.execute(`
+            INSERT INTO deployments
+            (github_user_id, project_name, repository_name, container_name, image_name, port, url, status, service_type, apk_url, aab_url, env_vars)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [githubUserId, projectName, repository, containerName, imageName, port, url, status, serviceType, apkUrl, aabUrl, envVars ? JSON.stringify(envVars) : null]);
+        return;
+    } catch (err) {
+        if (err.code !== 'ER_BAD_FIELD_ERROR') {
+            throw err;
         }
+        console.warn('[DB] env_vars/aab_url column missing, falling back to older insert shapes...');
     }
+
+    // Older fallback tiers below — kept for environments that haven't run every
+    // migration yet. New columns should not need a new tier here; add them to
+    // the current-schema insert above once migrations/ has been updated.
 
     // Full modern insert (includes per-user isolation + apk support)
     try {

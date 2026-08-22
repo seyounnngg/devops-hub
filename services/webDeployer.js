@@ -268,6 +268,7 @@ async function deploy(params, { addLog }) {
             url: finalUrl,
             status: 'running',
             serviceType: 'web',
+            envVars: Object.keys(envVars || {}).length > 0 ? envVars : null,
             githubUserId
         });
 

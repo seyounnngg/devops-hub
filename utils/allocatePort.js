@@ -6,7 +6,7 @@
  * to two containers. Uses a single-row counter table with SELECT ... FOR UPDATE
  * inside a transaction so concurrent callers serialize instead of colliding.
  *
- * Requires the `port_counter` table — run utils/create_port_counter_table.js once.
+ * Requires the `port_counter` table — see migrations/0006_create_port_counter_table.js.
  */
 async function allocatePort(pool, { startFrom = 3010 } = {}) {
     const conn = await pool.getConnection();

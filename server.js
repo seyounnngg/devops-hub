@@ -114,7 +114,7 @@ async function persistDeploymentLogs(githubUserId, projectName) {
 }
 global.persistDeploymentLogs = persistDeploymentLogs;
 
-// Preload persisted logs from DB at startup (per-user keyed, see utils/add_github_user_id_to_deployment_logs.js)
+// Preload persisted logs from DB at startup (per-user keyed, see migrations/0005_add_github_user_id_to_deployment_logs.js)
 (async () => {
     try {
         const [rows] = await pool.execute(
@@ -674,6 +674,37 @@ async function downloadMobileArtifact(req, res, { column, label }) {
 
 app.get('/deployments/:id/apk', (req, res) => downloadMobileArtifact(req, res, { column: 'apk_url', label: 'APK' }));
 app.get('/deployments/:id/aab', (req, res) => downloadMobileArtifact(req, res, { column: 'aab_url', label: 'AAB' }));
+
+// Stored env vars are picked up the next time this project is (re)deployed.
+app.put('/deployments/:id/env', async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
+        const { envVars } = req.body;
+
+        if (envVars !== null && (typeof envVars !== 'object' || Array.isArray(envVars))) {
+            return res.status(400).json({ error: 'envVars must be an object of key/value strings, or null to clear it' });
+        }
+
+        const [rows] = await pool.execute(
+            'SELECT id FROM deployments WHERE id = ? AND github_user_id = ?',
+            [req.params.id, user.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Deployment not found or access denied' });
+        }
+
+        const value = envVars && Object.keys(envVars).length > 0 ? JSON.stringify(envVars) : null;
+        await pool.execute('UPDATE deployments SET env_vars = ? WHERE id = ?', [value, req.params.id]);
+
+        res.json({ success: true });
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Failed to update environment variables' });
+    }
+});
 
 app.post('/deployments/:id/stop', async (req, res) => {
     try {
