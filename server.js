@@ -463,15 +463,34 @@ app.get('/auth/github/callback', async (req, res) => {
     }
 });
 
+// GitHub paginates /user/repos at 100/page max; a repo count above that means a single
+// request silently truncates the list, so follow the Link header's rel="next" until GitHub
+// stops sending one.
+async function fetchAllGithubRepos(accessToken) {
+    const repos = [];
+    let url = 'https://api.github.com/user/repos?per_page=100';
+
+    while (url) {
+        const response = await axios.get(url, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        repos.push(...response.data);
+
+        const linkHeader = response.headers.link;
+        const nextMatch = linkHeader && linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        url = nextMatch ? nextMatch[1] : null;
+    }
+
+    return repos;
+}
+
 app.get('/repositories', async (req, res) => {
     try {
         const user = await getAuthenticatedUser(req);
 
-        const response = await axios.get('https://api.github.com/user/repos', {
-            headers: { Authorization: `Bearer ${user.github_access_token}` }
-        });
+        const repos = await fetchAllGithubRepos(user.github_access_token);
 
-        res.json(response.data);
+        res.json(repos);
     } catch (error) {
         if (error.status === 401) {
             return res.status(401).json({ error: 'Authentication required' });
