@@ -19,6 +19,9 @@ function CreateProject() {
     // Web-only: list of { key, value } rows, converted to an object at submit time
     const [envVarRows, setEnvVarRows] = useState([]);
 
+    // Web-only: in-container path (if any) that should survive redeploys via a named Docker volume
+    const [volumePath, setVolumePath] = useState('');
+
     // Error shown only after user clicks Next with invalid input
     const [nameError, setNameError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -68,6 +71,7 @@ function CreateProject() {
             branch,
             serviceType,
             ...(serviceType === 'web' && Object.keys(envVars).length > 0 ? { envVars } : {}),
+            ...(serviceType === 'web' && volumePath.trim() ? { volumePath: volumePath.trim() } : {}),
         }).catch((err) => {
             console.error('Deployment request failed:', err);
             // The Progress page keeps polling logs and will show the failure there.
@@ -300,6 +304,26 @@ function CreateProject() {
                                         ))}
                                     </div>
                                 )}
+                            </div>
+                        )}
+
+                        {serviceType === 'web' && (
+                            <div className="mb-8">
+                                <label className="text-xs font-semibold tracking-[1px] text-zinc-400 uppercase block mb-2">
+                                    Persistent Data Path <span className="normal-case text-zinc-500">(optional)</span>
+                                </label>
+                                <p className="text-xs text-zinc-500 mb-2">
+                                    If your app writes files it needs to keep (uploads, a database file, generated
+                                    output), enter the in-container path here — e.g. <code className="text-zinc-400">/app/data</code>.
+                                    It'll be backed by a persistent volume that survives redeploys.
+                                </p>
+                                <input
+                                    type="text"
+                                    placeholder="/app/data"
+                                    value={volumePath}
+                                    onChange={(e) => setVolumePath(e.target.value)}
+                                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                                />
                             </div>
                         )}
 

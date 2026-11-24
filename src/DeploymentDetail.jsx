@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars, addCustomDomain, removeCustomDomain, redeployProject, rollbackToBuild, getBuildHistory } from "./api";
+import { getLogs, getDeployments, getDeployment, deleteDeployment, apkDownloadUrl, aabDownloadUrl, updateEnvVars, updateVolumePath, addCustomDomain, removeCustomDomain, redeployProject, rollbackToBuild, getBuildHistory } from "./api";
 
 function DeploymentDetail() {
 
@@ -19,6 +19,11 @@ function DeploymentDetail() {
     const [domainInput, setDomainInput] = useState('');
     const [domainBusy, setDomainBusy] = useState(false);
     const [domainMessage, setDomainMessage] = useState('');
+
+    const [volumePathInput, setVolumePathInput] = useState('');
+    const [volumePathLoadedFor, setVolumePathLoadedFor] = useState(null);
+    const [savingVolumePath, setSavingVolumePath] = useState(false);
+    const [volumeSaveMessage, setVolumeSaveMessage] = useState('');
 
     const [builds, setBuilds] = useState([]);
     const [redeploying, setRedeploying] = useState(false);
@@ -147,6 +152,27 @@ function DeploymentDetail() {
             setEnvSaveMessage('Failed to save.');
         } finally {
             setSavingEnvVars(false);
+        }
+    }
+
+    // Same one-time-load pattern as env vars: don't overwrite what the user is typing on every poll tick.
+    useEffect(() => {
+        if (!deployment || deployment.id === volumePathLoadedFor) return;
+        setVolumePathInput(deployment.volume_path || '');
+        setVolumePathLoadedFor(deployment.id);
+    }, [deployment, volumePathLoadedFor]);
+
+    async function handleSaveVolumePath() {
+        if (!deployment?.id) return;
+        setSavingVolumePath(true);
+        setVolumeSaveMessage('');
+        try {
+            await updateVolumePath(deployment.id, volumePathInput.trim() || null);
+            setVolumeSaveMessage('Saved. Redeploy this project to apply it.');
+        } catch (e) {
+            setVolumeSaveMessage(e.message || 'Failed to save.');
+        } finally {
+            setSavingVolumePath(false);
         }
     }
 
@@ -398,6 +424,35 @@ function DeploymentDetail() {
                         </button>
                         {envSaveMessage && <span className="text-xs text-zinc-400">{envSaveMessage}</span>}
                     </div>
+                </div>
+            )}
+
+            {/* Persistent Volume (Web only) */}
+            {deployment && deployment.service_type === 'web' && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 mb-6">
+                    <div className="font-semibold tracking-tight mb-1">Persistent Data Path</div>
+                    <p className="text-xs text-zinc-500 mb-4">
+                        An in-container path backed by a named Docker volume, so its contents survive redeploys
+                        instead of being wiped along with the old container — e.g. <code className="text-zinc-400">/app/data</code>.
+                        Leave blank to disable.
+                    </p>
+                    <div className="flex items-center gap-3 mb-2">
+                        <input
+                            type="text"
+                            placeholder="/app/data"
+                            value={volumePathInput}
+                            onChange={(e) => setVolumePathInput(e.target.value)}
+                            className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-white/60"
+                        />
+                        <button
+                            onClick={handleSaveVolumePath}
+                            disabled={savingVolumePath}
+                            className="px-5 py-2 text-sm font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition disabled:opacity-60"
+                        >
+                            {savingVolumePath ? 'Saving...' : 'Save'}
+                        </button>
+                    </div>
+                    {volumeSaveMessage && <p className="text-xs text-zinc-400">{volumeSaveMessage}</p>}
                 </div>
             )}
 

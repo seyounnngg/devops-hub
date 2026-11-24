@@ -96,6 +96,14 @@ export function updateEnvVars(id, envVars) {
   });
 }
 
+export function updateVolumePath(id, volumePath) {
+  return fetchJson(`/deployments/${id}/volume`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ volumePath }),
+  });
+}
+
 export function addCustomDomain(id, customDomain) {
   return fetchJson(`/deployments/${id}/domain`, {
     method: 'POST',
