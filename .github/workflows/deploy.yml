@@ -14,4 +14,4 @@ jobs:
 
       - name: Deploy Backend (via single-source script)
         run: |
-          /home/dev/deploy-backend.sh
+          "$HOME/deploy-backend.sh"
