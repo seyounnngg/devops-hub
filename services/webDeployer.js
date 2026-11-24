@@ -10,6 +10,7 @@ const { cloneRepo, cloneRepoAtCommit } = require('../utils/gitClone');
 const { allocatePort } = require('../utils/allocatePort');
 const { registerWebhook } = require('../utils/githubWebhook');
 const { assertSafeContainerPath } = require('../utils/validate');
+const { DEPLOYMENTS_DIR } = require('../utils/paths');
 
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'https://api.hgu.app';
 
@@ -102,7 +103,7 @@ async function deploy(params, { addLog }) {
     let internalPort = params.internalPort || 80;
 
     const deploymentId = Date.now();
-    const projectPath = `/tmp/deployments/${projectName}-${deploymentId}`;
+    const projectPath = path.join(DEPLOYMENTS_DIR, `${projectName}-${deploymentId}`);
     const imageName = `web-${deploymentId}`;
     const containerName = `web-${deploymentId}`;
 

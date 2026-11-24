@@ -4,6 +4,7 @@ const fs = require('fs');
 const { safeInsertDeployment } = require('../utils/dbHelpers');
 const { assertSafeRepository, assertSafeBranch, assertSafePathSegment } = require('../utils/validate');
 const { getOrCreateSigningKey, BUILD_IMAGE, KEYSTORE_DIR } = require('../utils/signingKey');
+const { APK_BUILD_DIR, APK_DIR } = require('../utils/paths');
 
 const BUILD_MEM_LIMIT = process.env.DEPLOY_BUILD_MEM_LIMIT || '3g';
 const BUILD_CPU_LIMIT = process.env.DEPLOY_BUILD_CPU_LIMIT || '2';
@@ -191,7 +192,7 @@ async function build(params, { addLog }) {
     addLog('📦 Cloning repository...');
 
     const deploymentId = Date.now();
-    const projectPath = `/tmp/apk-builds/${projectName}-${deploymentId}`;
+    const projectPath = path.join(APK_BUILD_DIR, `${projectName}-${deploymentId}`);
 
     try {
         fs.mkdirSync(path.dirname(projectPath), { recursive: true });
@@ -303,17 +304,17 @@ async function build(params, { addLog }) {
             throw new Error('Build finished but no APK artifact was found in the outputs directory.');
         }
 
-        await fs.promises.mkdir('/tmp/apks', { recursive: true });
+        await fs.promises.mkdir(APK_DIR, { recursive: true });
 
         const apkFileName = `${projectName}-${deploymentId}.apk`;
-        await fs.promises.copyFile(path.join(detection.root, finalApkRel), `/tmp/apks/${apkFileName}`);
+        await fs.promises.copyFile(path.join(detection.root, finalApkRel), path.join(APK_DIR, apkFileName));
         const apkUrl = `/apks/${apkFileName}`;
         addLog(`✅ APK ready${signedApkRel ? ' (signed)' : ' (unsigned fallback)'}`);
 
         let aabUrl = null;
         if (finalAabRel) {
             const aabFileName = `${projectName}-${deploymentId}.aab`;
-            await fs.promises.copyFile(path.join(detection.root, finalAabRel), `/tmp/apks/${aabFileName}`);
+            await fs.promises.copyFile(path.join(detection.root, finalAabRel), path.join(APK_DIR, aabFileName));
             aabUrl = `/apks/${aabFileName}`;
             addLog(`✅ AAB ready${signedAabRel ? ' (signed)' : ' (unsigned fallback)'} — for Play Store upload`);
         } else {

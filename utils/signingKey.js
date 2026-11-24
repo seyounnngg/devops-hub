@@ -22,7 +22,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const BUILD_IMAGE = process.env.MOBILE_BUILD_IMAGE || 'ghcr.io/cirruslabs/flutter:stable';
-const KEYSTORE_DIR = process.env.KEYSTORE_DIR || '/tmp/apk-keystores';
+const { KEYSTORE_DIR } = require('./paths');
 
 function slugify(name) {
     return (name || 'app')

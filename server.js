@@ -19,8 +19,7 @@ const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSaf
 const { verifyWebhookSignature } = require('./utils/verifyWebhookSignature');
 
 // Ensure directories that will be used for builds and APK artifacts
-const APK_DIR = '/tmp/apks';
-const APK_BUILD_DIR = '/tmp/apk-builds';
+const { APK_DIR, APK_BUILD_DIR } = require('./utils/paths');
 [APK_DIR, APK_BUILD_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -295,7 +294,7 @@ async function removeDeploymentResources(deployment) {
 
     if (deployment.apk_url) {
         try {
-            const apkPath = path.join('/tmp/apks', path.basename(deployment.apk_url));
+            const apkPath = path.join(APK_DIR, path.basename(deployment.apk_url));
             if (fs.existsSync(apkPath)) fs.unlinkSync(apkPath);
         } catch (e) {
             console.error('APK file cleanup error (non-fatal):', e.message);
@@ -303,7 +302,7 @@ async function removeDeploymentResources(deployment) {
     }
     if (deployment.aab_url) {
         try {
-            const aabPath = path.join('/tmp/apks', path.basename(deployment.aab_url));
+            const aabPath = path.join(APK_DIR, path.basename(deployment.aab_url));
             if (fs.existsSync(aabPath)) fs.unlinkSync(aabPath);
         } catch (e) {
             console.error('AAB file cleanup error (non-fatal):', e.message);
@@ -744,7 +743,7 @@ async function downloadMobileArtifact(req, res, { column, label }) {
             return res.status(404).json({ error: `${label} not found` });
         }
 
-        const filePath = path.join('/tmp/apks', path.basename(rows[0][column]));
+        const filePath = path.join(APK_DIR, path.basename(rows[0][column]));
         if (!fs.existsSync(filePath)) {
             return res.status(404).json({ error: `${label} file no longer available` });
         }
