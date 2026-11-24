@@ -16,6 +16,7 @@ async function safeInsertDeployment(pool, values) {
         apkUrl = null,
         aabUrl = null,
         envVars = null,
+        volumePath = null,
         githubUserId = null
     } = values;
 
@@ -24,15 +25,15 @@ async function safeInsertDeployment(pool, values) {
     try {
         const [result] = await pool.execute(`
             INSERT INTO deployments
-            (github_user_id, project_name, repository_name, branch, container_name, image_name, port, url, status, service_type, apk_url, aab_url, env_vars)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [githubUserId, projectName, repository, branch, containerName, imageName, port, url, status, serviceType, apkUrl, aabUrl, envVars ? JSON.stringify(envVars) : null]);
+            (github_user_id, project_name, repository_name, branch, container_name, image_name, port, url, status, service_type, apk_url, aab_url, env_vars, volume_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [githubUserId, projectName, repository, branch, containerName, imageName, port, url, status, serviceType, apkUrl, aabUrl, envVars ? JSON.stringify(envVars) : null, volumePath]);
         return result.insertId;
     } catch (err) {
         if (err.code !== 'ER_BAD_FIELD_ERROR') {
             throw err;
         }
-        console.warn('[DB] branch/env_vars/aab_url column missing, falling back to older insert shapes...');
+        console.warn('[DB] branch/env_vars/aab_url/volume_path column missing, falling back to older insert shapes...');
     }
 
     // Older fallback tiers below — kept for environments that haven't run every

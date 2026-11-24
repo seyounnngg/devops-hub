@@ -15,7 +15,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 
-const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSafeDomain } = require('./utils/validate');
+const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSafeDomain, assertSafeContainerPath } = require('./utils/validate');
 const { verifyWebhookSignature } = require('./utils/verifyWebhookSignature');
 
 // Ensure directories that will be used for builds and APK artifacts
@@ -261,6 +261,12 @@ async function removeDeploymentResources(deployment) {
     }
     if (deployment.image_name) {
         await dockerRmi(deployment.image_name);
+    }
+
+    // Deleting the project is a deliberate, final action — take the persisted data
+    // (if any) with it, the same way the container and image are torn down above.
+    if (deployment.volume_path) {
+        await execFileAsync('docker', ['volume', 'rm', `vol-${deployment.project_name}`]).catch(() => {});
     }
 
     try {
@@ -544,7 +550,8 @@ app.post('/projects', deployLimiter, async (req, res) => {
             serviceType = 'web',
             // Web specific
             internalPort,
-            envVars
+            envVars,
+            volumePath
         } = req.body;
 
         const decoded = await getAuthenticatedUser(req); // throws on missing/invalid (401)
@@ -552,6 +559,7 @@ app.post('/projects', deployLimiter, async (req, res) => {
         assertSafeProjectName(name);
         assertSafeRepository(repository);
         assertSafeBranch(branch);
+        const safeVolumePath = volumePath ? assertSafeContainerPath(volumePath) : null;
 
         if (!['web', 'apk'].includes(serviceType)) {
             return res.status(400).json({ error: `Unsupported serviceType: ${serviceType}` });
@@ -602,7 +610,8 @@ app.post('/projects', deployLimiter, async (req, res) => {
                 githubUserId,
                 pool,
                 internalPort,
-                envVars
+                envVars,
+                volumePath: safeVolumePath
             },
             {
                 addLog,
@@ -784,6 +793,46 @@ app.put('/deployments/:id/env', async (req, res) => {
     }
 });
 
+// Persists which in-container path (if any) gets a named Docker volume mounted at it, so
+// a service's own data (uploads, generated files, ...) survives redeploys instead of living
+// only in the throwaway container filesystem. Like /env, this only takes effect on the next
+// redeploy — it doesn't touch the currently running container.
+app.put('/deployments/:id/volume', async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
+        const { volumePath } = req.body;
+
+        if (volumePath !== null && volumePath !== undefined && typeof volumePath !== 'string') {
+            return res.status(400).json({ error: 'volumePath must be a string, or null to disable' });
+        }
+        const safeVolumePath = volumePath ? assertSafeContainerPath(volumePath) : null;
+
+        const [rows] = await pool.execute(
+            'SELECT id, service_type FROM deployments WHERE id = ? AND github_user_id = ?',
+            [req.params.id, user.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Deployment not found or access denied' });
+        }
+        if (rows[0].service_type !== 'web') {
+            return res.status(400).json({ error: 'Persistent volumes are only supported for Web deployments' });
+        }
+
+        await pool.execute('UPDATE deployments SET volume_path = ? WHERE id = ?', [safeVolumePath, req.params.id]);
+
+        res.json({ success: true });
+    } catch (error) {
+        if (error.status === 401) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (error.status === 400) {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Failed to update persistent volume path' });
+    }
+});
+
 app.post('/deployments/:id/domain', async (req, res) => {
     try {
         const user = await getAuthenticatedUser(req);
@@ -888,6 +937,7 @@ async function runRedeploy(user, deployment, { commitOverride = null, triggeredB
             githubUserId: user.id,
             pool,
             envVars,
+            volumePath: deployment.volume_path || null,
             existingDeployment: deployment,
             commitOverride,
             triggeredBy

@@ -69,11 +69,31 @@ function assertSafeDomain(domain) {
     return domain.toLowerCase();
 }
 
+// Absolute in-container path a persistent volume gets mounted at (e.g. /app/data).
+// No "..", no mounting the container root, no shell/docker-arg metacharacters.
+const CONTAINER_PATH_RE = /^\/[A-Za-z0-9._/-]{1,254}$/;
+
+function assertSafeContainerPath(volumePath) {
+    if (
+        typeof volumePath !== 'string' ||
+        !CONTAINER_PATH_RE.test(volumePath) ||
+        volumePath === '/' ||
+        volumePath.includes('..') ||
+        volumePath.includes('//')
+    ) {
+        const err = new Error('Invalid path. Enter an absolute in-container path like /app/data (no ".." or "//").');
+        err.status = 400;
+        throw err;
+    }
+    return volumePath;
+}
+
 module.exports = {
     assertSafeProjectName,
     assertSafeRepository,
     assertSafeBranch,
     assertSafePathSegment,
     assertSafeDomain,
-    assertSafeCommitHash
+    assertSafeCommitHash,
+    assertSafeContainerPath
 };

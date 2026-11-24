@@ -9,6 +9,7 @@ const { createProxyHost, updateProxyHost } = require('./NpmProxyManager');
 const { cloneRepo, cloneRepoAtCommit } = require('../utils/gitClone');
 const { allocatePort } = require('../utils/allocatePort');
 const { registerWebhook } = require('../utils/githubWebhook');
+const { assertSafeContainerPath } = require('../utils/validate');
 
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'https://api.hgu.app';
 
@@ -26,6 +27,12 @@ try {
 
 const MEM_LIMIT = process.env.DEPLOY_MEM_LIMIT || '512m';
 const CPU_LIMIT = process.env.DEPLOY_CPU_LIMIT || '1';
+
+// Per-project memory overrides, for projects whose workload needs more than the
+// platform default. Keyed by project name; anything not listed here gets MEM_LIMIT.
+const MEM_LIMIT_OVERRIDES = {
+    study: '1.5g',
+};
 
 // Internal container port each auto-generated template's CMD actually listens on.
 // Anything not listed here (e.g. static/nginx-based templates) defaults to 80.
@@ -83,6 +90,7 @@ async function deploy(params, { addLog }) {
         githubUsername,
         pool,
         envVars = {},
+        volumePath = null,
         githubUserId = null,
         existingDeployment = null,
         commitOverride = null,
@@ -97,6 +105,19 @@ async function deploy(params, { addLog }) {
     const projectPath = `/tmp/deployments/${projectName}-${deploymentId}`;
     const imageName = `web-${deploymentId}`;
     const containerName = `web-${deploymentId}`;
+
+    // Named volume, keyed by project (not by this deployment attempt's container/image
+    // names) so the same volume gets reattached on every redeploy no matter how many
+    // times the container underneath it is swapped out.
+    let safeVolumePath = null;
+    if (volumePath) {
+        try {
+            safeVolumePath = assertSafeContainerPath(volumePath);
+        } catch (e) {
+            addLog(`⚠️ Ignoring invalid persistent volume path: ${e.message}`);
+        }
+    }
+    const volumeName = safeVolumePath ? `vol-${projectName}` : null;
 
     let failureStage = null;
     let commitHash = null;
@@ -214,6 +235,19 @@ async function deploy(params, { addLog }) {
             throw buildErr;
         }
 
+        // Persistent volume: created up front (idempotent — `docker volume create` on an
+        // existing name is a no-op success, so this works identically the first time and
+        // on every later redeploy) and mounted below. Because the name is derived only
+        // from projectName, it outlives every container/image swap.
+        if (volumeName) {
+            try {
+                await execFileAsync('docker', ['volume', 'create', volumeName]);
+                addLog(`💾 Persistent volume "${volumeName}" ready → mounted at ${safeVolumePath}`);
+            } catch (volErr) {
+                addLog(`⚠️ Could not create persistent volume "${volumeName}" (${volErr.message}); continuing without it.`);
+            }
+        }
+
         // Run container (on its own new port — the old one, if any, keeps serving traffic)
         addLog(`🐳 [3/6] Starting container (internal port ${internalPort} → external ${externalPort})...`);
 
@@ -226,13 +260,18 @@ async function deploy(params, { addLog }) {
             envArgs.push('-e', `${key}=${value}`);
         }
 
+        const volumeArgs = volumeName ? ['-v', `${volumeName}:${safeVolumePath}`] : [];
+        const memLimit = MEM_LIMIT_OVERRIDES[projectName] || MEM_LIMIT;
+
         const runArgs = [
             'run', '-d',
             '--name', containerName,
-            '--memory', MEM_LIMIT,
+            '--restart', 'unless-stopped',
+            '--memory', memLimit,
             '--cpus', CPU_LIMIT,
             '-p', `${externalPort}:${internalPort}`,
             ...envArgs,
+            ...volumeArgs,
             imageName
         ];
 
@@ -311,8 +350,8 @@ async function deploy(params, { addLog }) {
             }
 
             await pool.execute(
-                `UPDATE deployments SET container_name = ?, image_name = ?, port = ?, url = ?, status = 'running', env_vars = ? WHERE id = ?`,
-                [containerName, imageName, externalPort, finalUrl, finalEnvVars ? JSON.stringify(finalEnvVars) : existingDeployment.env_vars, existingDeployment.id]
+                `UPDATE deployments SET container_name = ?, image_name = ?, port = ?, url = ?, status = 'running', env_vars = ?, volume_path = ? WHERE id = ?`,
+                [containerName, imageName, externalPort, finalUrl, finalEnvVars ? JSON.stringify(finalEnvVars) : existingDeployment.env_vars, safeVolumePath, existingDeployment.id]
             );
 
             addLog('✅ [5/6] Traffic switched to the new container; previous one removed');
@@ -344,6 +383,7 @@ async function deploy(params, { addLog }) {
                 status: 'running',
                 serviceType: 'web',
                 envVars: finalEnvVars,
+                volumePath: safeVolumePath,
                 githubUserId
             });
 

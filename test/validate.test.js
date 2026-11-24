@@ -6,7 +6,8 @@ const {
     assertSafeBranch,
     assertSafePathSegment,
     assertSafeDomain,
-    assertSafeCommitHash
+    assertSafeCommitHash,
+    assertSafeContainerPath
 } = require('../utils/validate');
 
 test('assertSafeProjectName accepts normal names', () => {
@@ -63,4 +64,18 @@ test('assertSafeCommitHash rejects non-hex and injection attempts', () => {
     assert.throws(() => assertSafeCommitHash('main'));
     assert.throws(() => assertSafeCommitHash('ae58aff; rm -rf /'));
     assert.throws(() => assertSafeCommitHash(''));
+});
+
+test('assertSafeContainerPath accepts absolute in-container paths', () => {
+    assert.doesNotThrow(() => assertSafeContainerPath('/app/data'));
+    assert.doesNotThrow(() => assertSafeContainerPath('/var/lib/app-data_2'));
+});
+
+test('assertSafeContainerPath rejects root, relative paths, traversal, and injection attempts', () => {
+    assert.throws(() => assertSafeContainerPath('/'));
+    assert.throws(() => assertSafeContainerPath('app/data'));
+    assert.throws(() => assertSafeContainerPath('/app/../etc/passwd'));
+    assert.throws(() => assertSafeContainerPath('/app//data'));
+    assert.throws(() => assertSafeContainerPath('/app/data; rm -rf /'));
+    assert.throws(() => assertSafeContainerPath(''));
 });
