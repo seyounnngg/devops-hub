@@ -141,10 +141,19 @@ async function deploy(params, { addLog }) {
         : `📦 [1/6] Cloning repository (branch: ${branch})...`);
 
     try {
-        if (commitOverride) {
-            await cloneRepoAtCommit({ githubUsername, repository, commit: commitOverride, githubToken, destPath: projectPath });
-        } else {
-            await cloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath });
+        // K19: transient network errors are retried inside gitClone; each retry is logged here.
+        const onRetry = ({ attempt, total, delayMs, reason }) =>
+            addLog(`⚠️ [1/6] Clone failed (${reason}) — retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${total})`);
+        try {
+            if (commitOverride) {
+                await cloneRepoAtCommit({ githubUsername, repository, commit: commitOverride, githubToken, destPath: projectPath, onRetry });
+            } else {
+                await cloneRepo({ githubUsername, repository, branch, githubToken, destPath: projectPath, onRetry });
+            }
+        } catch (cloneErr) {
+            failureStage = cloneErr.failureStage || 'clone_failed';
+            addLog(`❌ [1/6] ${cloneErr.message}`);
+            throw cloneErr;
         }
         addLog('✅ [1/6] Repository cloned successfully');
 
