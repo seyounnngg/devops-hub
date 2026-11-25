@@ -12,6 +12,7 @@ const { registerWebhook } = require('../utils/githubWebhook');
 const { assertSafeContainerPath } = require('../utils/validate');
 const { DEPLOYMENTS_DIR } = require('../utils/paths');
 const { publishSpec, appBindHost } = require('../utils/appUpstream');
+const { saveInternalPort } = require('../utils/internalPort');
 
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'https://api.hgu.app';
 
@@ -394,6 +395,9 @@ async function deploy(params, { addLog }) {
             status: 'success',
             triggeredBy
         });
+
+        // K15: remember the port this container listens on for later redeploys/rollbacks.
+        await saveInternalPort(pool, deploymentRowId, internalPort);
 
         // Auto-redeploy on git push — only set up once, when the project is first created.
         if (!isRedeploy) {

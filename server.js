@@ -17,6 +17,8 @@ const fs = require('fs');
 
 const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSafeDomain, assertSafeContainerPath } = require('./utils/validate');
 const { verifyWebhookSignature } = require('./utils/verifyWebhookSignature');
+const deployLock = require('./utils/deployLock');
+const { resolveInternalPort } = require('./utils/internalPort');
 
 // Ensure directories that will be used for builds and APK artifacts
 const { APK_DIR, APK_BUILD_DIR } = require('./utils/paths');
@@ -538,6 +540,7 @@ app.get('/projects', async (req, res) => {
 
 app.post('/projects', deployLimiter, async (req, res) => {
     let projectNameFromBody = req.body?.name;
+    let createRelease = null;
 
     try {
         console.log('DEPLOY START');
@@ -572,6 +575,14 @@ app.post('/projects', deployLimiter, async (req, res) => {
             return res.status(429).json({
                 error: `You have reached the limit of ${MAX_CONCURRENT_DEPLOYMENTS_PER_USER} active deployments. Stop or delete one before creating another.`
             });
+        }
+
+        // K16: a double-clicked "Deploy" would otherwise start two first deployments
+        // of the same name (the existing-name check below only sees rows inserted at
+        // the end of a deployment).
+        createRelease = deployLock.tryAcquire(deployLock.createKey(decoded.id, name), 'first deployment');
+        if (!createRelease) {
+            return res.status(409).json({ error: `A deployment of "${name}" is already running. Wait for it to finish.` });
         }
 
         const [existingRows] = await pool.execute(
@@ -636,9 +647,11 @@ app.post('/projects', deployLimiter, async (req, res) => {
 
         const status = error.status || 500;
         res.status(status).json({
-            error: status === 401 ? 'Authentication required' : (status === 400 ? error.message : 'Deployment failed'),
+            error: status === 401 ? 'Authentication required' : (status === 400 || status === 409 ? error.message : 'Deployment failed'),
             message: error.message
         });
+    } finally {
+        if (createRelease) createRelease();
     }
 });
 
@@ -925,6 +938,16 @@ async function runRedeploy(user, deployment, { commitOverride = null, triggeredB
 
     addLog(`🚀 ${triggeredBy === 'rollback' ? 'Rollback' : 'Redeploy'} started for ${deployment.project_name}`);
 
+    // K15: reuse the container port of this project instead of letting webDeployer
+    // default to 80 for repos with their own Dockerfile.
+    const { port: internalPort, source: internalPortSource } = await resolveInternalPort(deployment, async (name) => {
+        const { stdout } = await execFileAsync('docker', ['inspect', '--format', '{{json .HostConfig.PortBindings}}', name]);
+        return JSON.parse(stdout);
+    });
+    if (internalPort) {
+        addLog(`🔌 Container port ${internalPort} (${internalPortSource === 'stored' ? 'saved with this project' : 'taken from the running container'})`);
+    }
+
     const result = await deployProject(
         {
             name: deployment.project_name,
@@ -937,6 +960,7 @@ async function runRedeploy(user, deployment, { commitOverride = null, triggeredB
             pool,
             envVars,
             volumePath: deployment.volume_path || null,
+            internalPort,
             existingDeployment: deployment,
             commitOverride,
             triggeredBy
@@ -950,6 +974,71 @@ async function runRedeploy(user, deployment, { commitOverride = null, triggeredB
 
     await persistDeploymentLogs(user.id, deployment.project_name);
     return result;
+}
+
+async function loadDeploymentById(id) {
+    const [rows] = await pool.execute('SELECT * FROM deployments WHERE id = ?', [id]);
+    return rows[0] || null;
+}
+
+/**
+ * K16: run `fn(freshDeployment)` while holding the project's deployment lock.
+ * Throws a 409 error if another redeploy/rollback/webhook/delete of the same
+ * project is running. The row is re-read *after* taking the lock, so it reflects
+ * whatever the previous deployment switched to (its container is the one to
+ * replace). A webhook push that arrived meanwhile is run afterwards.
+ */
+async function withDeploymentLock(deploymentId, kind, fn) {
+    const key = deployLock.deploymentKey(deploymentId);
+    const release = deployLock.tryAcquire(key, kind);
+    if (!release) throw deployLock.busyError(key);
+    try {
+        const fresh = await loadDeploymentById(deploymentId);
+        if (!fresh) {
+            const err = new Error('Deployment not found');
+            err.status = 404;
+            throw err;
+        }
+        return await fn(fresh);
+    } finally {
+        release();
+        drainPendingWebhook(deploymentId);
+    }
+}
+
+/** Start a webhook redeploy now, or queue one (coalesced) if the project is busy. */
+function startWebhookRedeploy(deploymentId) {
+    const key = deployLock.deploymentKey(deploymentId);
+    const release = deployLock.tryAcquire(key, 'webhook redeploy');
+    if (!release) {
+        deployLock.markPending(key);
+        return 'queued';
+    }
+    (async () => {
+        try {
+            const deployment = await loadDeploymentById(deploymentId);
+            if (!deployment) return; // deleted meanwhile
+            const identity = await getLatestGithubIdentity(deployment.github_user_id);
+            if (!identity) {
+                console.error(`[webhook] No active session for user ${deployment.github_user_id} — cannot auto-redeploy ${deployment.project_name}.`);
+                return;
+            }
+            await runRedeploy(identity, deployment, { triggeredBy: 'webhook' });
+        } catch (err) {
+            console.error(`[webhook] Redeploy failed for deployment ${deploymentId}:`, err.message);
+        } finally {
+            release();
+            drainPendingWebhook(deploymentId);
+        }
+    })();
+    return 'started';
+}
+
+function drainPendingWebhook(deploymentId) {
+    if (deployLock.takePending(deployLock.deploymentKey(deploymentId))) {
+        console.log(`[webhook] Running the push that arrived during the previous deployment of #${deploymentId}`);
+        startWebhookRedeploy(deploymentId);
+    }
 }
 
 // GitHub push webhook — public (no session), self-authenticated via a
@@ -1003,9 +1092,13 @@ app.post('/webhooks/github', async (req, res) => {
     // Respond right away — GitHub's webhook delivery has its own short timeout,
     // and a build can take minutes. The redeploy keeps running in the background;
     // progress shows up in the normal Live Logs / Deployment History UI.
-    res.json({ success: true, message: 'Redeploy triggered' });
-    runRedeploy(identity, deployment, { triggeredBy: 'webhook' }).catch((err) => {
-        console.error(`[webhook] Redeploy failed for ${deployment.project_name}:`, err.message);
+    // K16: if this project is already deploying, the push is queued and run after it.
+    const state = startWebhookRedeploy(deployment.id);
+    res.json({
+        success: true,
+        message: state === 'queued'
+            ? 'A deployment of this project is running — this push will be deployed right after it'
+            : 'Redeploy triggered'
     });
 });
 
@@ -1035,7 +1128,8 @@ app.post('/deployments/:id/redeploy', deployLimiter, async (req, res) => {
     try {
         const loaded = await loadOwnedWebDeployment(req, res);
         if (!loaded) return;
-        const result = await runRedeploy(loaded.user, loaded.deployment, { triggeredBy: 'manual' });
+        const result = await withDeploymentLock(loaded.deployment.id, 'redeploy',
+            (fresh) => runRedeploy(loaded.user, fresh, { triggeredBy: 'manual' }));
         res.json(result);
     } catch (error) {
         if (error.status === 401) {
@@ -1065,7 +1159,8 @@ app.post('/deployments/:id/rollback', deployLimiter, async (req, res) => {
             return res.status(400).json({ error: 'This build has no recorded commit to roll back to' });
         }
 
-        const result = await runRedeploy(user, deployment, { commitOverride: build.commit_hash, triggeredBy: 'rollback' });
+        const result = await withDeploymentLock(deployment.id, 'rollback',
+            (fresh) => runRedeploy(user, fresh, { commitOverride: build.commit_hash, triggeredBy: 'rollback' }));
         res.json(result);
     } catch (error) {
         if (error.status === 401) {
@@ -1186,16 +1281,21 @@ app.delete('/deployments/:id', async (req, res) => {
             return res.status(404).json({ error: 'Deployment not found or access denied' });
         }
 
-        const deployment = rows[0];
-        await removeDeploymentResources(deployment);
-
-        await pool.execute('DELETE FROM deployments WHERE id = ?', [id]);
+        // K16: never tear a project down while it is being (re)deployed — the running
+        // deployment would recreate its container/proxy after the delete.
+        await withDeploymentLock(rows[0].id, 'delete', async (deployment) => {
+            await removeDeploymentResources(deployment);
+            await pool.execute('DELETE FROM deployments WHERE id = ?', [id]);
+        });
 
         res.json({ success: true });
     } catch (error) {
         console.error(error);
         if (error.status === 401) {
             return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (error.status === 409) {
+            return res.status(409).json({ error: error.message });
         }
         res.status(500).json({ error: 'Delete failed' });
     }

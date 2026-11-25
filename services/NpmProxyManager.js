@@ -178,10 +178,38 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
   };
 }
 
+// NPM objects that can reference a certificate. If any of them still uses it,
+// the certificate is kept.
+const CERT_USER_ENDPOINTS = ['proxy-hosts', 'redirection-hosts', 'dead-hosts', 'streams'];
+
 /**
- * Delete the Proxy Host for the given project name (if it exists).
- * Reuses the same token acquisition and slugify logic as createProxyHost().
- * Never throws; logs warning on failure so deletion can continue.
+ * K14: is certificate `certId` still referenced by any NPM host/stream?
+ * Returns { inUse: boolean, by?: string } or throws if usage can't be determined
+ * (then the caller must NOT delete the certificate).
+ */
+async function findCertificateUsers(npmApiUrl, token, certId) {
+  for (const kind of CERT_USER_ENDPOINTS) {
+    const resp = await axios.get(`${npmApiUrl}/nginx/${kind}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+    const user = (resp.data || []).find(item => item && Number(item.certificate_id) === Number(certId));
+    if (user) {
+      return { inUse: true, by: `${kind} #${user.id}${user.domain_names ? ` (${user.domain_names.join(', ')})` : ''}` };
+    }
+  }
+  return { inUse: false };
+}
+
+/**
+ * Delete the Proxy Host for the given project name (if it exists), and then —
+ * K14 — the certificate it used, if nothing else uses that certificate any more
+ * (AUTO_SSL issues one certificate per project; it used to be left behind and
+ * keep renewing). Reuses the same token acquisition and slugify logic as
+ * createProxyHost().
+ *
+ * Never throws: the project deletion must succeed even if NPM cleanup fails.
+ * Returns { proxyDeleted, certificateId, certificateDeleted, certificateKeptReason }.
  */
 async function deleteProxyHost({ projectName, addLog = console.log }) {
   const npmApiUrl = process.env.NPM_API_URL || '';
@@ -189,15 +217,16 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
   const npmPassword = process.env.NPM_PASSWORD || '';
 
   const domain = `${slugifyForDomain(projectName)}.hgu.app`;
+  const result = { proxyDeleted: false, certificateId: null, certificateDeleted: false, certificateKeptReason: null };
 
   if (!npmApiUrl) {
     addLog('⚠️ [NPM] NPM_API_URL not configured. Skipping Proxy Host deletion.');
-    return;
+    return result;
   }
 
   if (!npmEmail || !npmPassword) {
     addLog('⚠️ [NPM] NPM_EMAIL / NPM_PASSWORD not configured. Skipping Proxy Host deletion.');
-    return;
+    return result;
   }
 
   let token;
@@ -205,7 +234,7 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
     token = await getNpmToken(npmApiUrl, npmEmail, npmPassword);
   } catch (e) {
     addLog(`⚠️ [NPM] Failed to authenticate with NPM for deletion: ${e.message}`);
-    return;
+    return result;
   }
 
   try {
@@ -219,19 +248,57 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
     );
 
     if (match && match.id) {
+      // Read the certificate id *before* deleting — afterwards it can't be looked up.
+      const certId = Number(match.certificate_id) > 0 ? Number(match.certificate_id) : null;
+      result.certificateId = certId;
+
       await axios.delete(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 30000
       });
+      result.proxyDeleted = true;
       addLog(`✅ [NPM] Deleted Proxy Host for ${domain} (id: ${match.id})`);
     } else {
       addLog(`ℹ️ [NPM] No Proxy Host found for ${domain} (nothing to delete)`);
+      return result;
     }
   } catch (err) {
     const detail = err.response?.data?.error || err.message || 'unknown error';
     addLog(`⚠️ [NPM] Failed to delete Proxy Host for ${domain}: ${detail}. Deletion will continue.`);
-    // Do not throw - deletion must succeed
+    // Do not throw - deletion must succeed. Certificate is left alone (proxy may still use it).
+    return result;
   }
+
+  if (!result.certificateId) return result;
+
+  const certId = result.certificateId;
+  try {
+    const usage = await findCertificateUsers(npmApiUrl, token, certId);
+    if (usage.inUse) {
+      result.certificateKeptReason = `still used by ${usage.by}`;
+      addLog(`ℹ️ [NPM] Keeping certificate #${certId}: ${result.certificateKeptReason}.`);
+      return result;
+    }
+  } catch (err) {
+    const detail = err.response?.data?.error?.message || err.response?.data?.error || err.message || 'unknown error';
+    result.certificateKeptReason = `could not check whether it is still used (${detail})`;
+    addLog(`⚠️ [NPM] Keeping certificate #${certId}: ${result.certificateKeptReason}. Remove it in NPM if it is unused.`);
+    return result;
+  }
+
+  try {
+    await axios.delete(`${npmApiUrl}/nginx/certificates/${certId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+    result.certificateDeleted = true;
+    addLog(`✅ [NPM] Deleted certificate #${certId} (no longer used).`);
+  } catch (err) {
+    const detail = err.response?.data?.error?.message || err.response?.data?.error || err.message || 'unknown error';
+    result.certificateKeptReason = `delete failed (${detail})`;
+    addLog(`⚠️ [NPM] Could not delete certificate #${certId}: ${detail}. Project deletion continues; remove it in NPM.`);
+  }
+  return result;
 }
 
 /**
