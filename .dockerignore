@@ -1,0 +1,12 @@
+# 비밀값: .env는 이미지에 넣지 않는다. 컨테이너에는 deploy-backend.sh가 --env-file로 넘긴다.
+.env
+.env.*
+!.env.example
+*.bak*
+# 이미지 안에서 npm install 하므로 호스트(또는 CI 테스트 단계)의 node_modules는 넣지 않는다
+node_modules
+npm-debug.log*
+*.log
+.git
+.github
+.DS_Store

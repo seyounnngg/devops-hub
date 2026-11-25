@@ -1,17 +1,41 @@
 name: Deploy Backend
 
+# 안전 조건 (public 저장소 + self-hosted 러너):
+# - push(이 저장소의 backend 브랜치)에만 반응한다. pull_request / pull_request_target / workflow_run 등은 쓰지 않는다.
+#   fork는 이 저장소 브랜치에 push할 수 없으므로 외부인이 이 작업을 실행시킬 수 없다.
+# - 저장소 Settings → Actions → General 에서 "Require approval for all external contributors"(fork PR 승인 필요),
+#   Workflow permissions "Read repository contents" 로 둔다 (runbook J1).
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "backend" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    runs-on: self-hosted
-
+    # fork에서 Actions를 켜더라도 실행되지 않게 저장소와 이벤트를 한 번 더 확인
+    if: github.repository == 'seyounnngg/devops-hub' && github.event_name == 'push'
+    runs-on: [self-hosted, f1-server]
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Deploy Backend (via single-source script)
+      # 호스트에 node가 없으므로 컨테이너에서. 러너와 같은 uid로 돌려야 작업 폴더에 root 소유 파일
+      # (node_modules)이 남지 않아 다음 실행의 checkout 정리가 실패하지 않는다.
+      - name: Test
         run: |
-          "$HOME/deploy-backend.sh"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
+            -v "$GITHUB_WORKSPACE":/app -w /app \
+            node:18-alpine sh -c "npm ci --no-audit --no-fund && npm test"
+
+      # 테스트가 실패하면 여기까지 오지 않는다. .env는 서버의 ~/hub-backend/.env를 쓴다(저장소에 없음).
+      - name: Deploy
+        run: '"$HOME/deploy-backend.sh" "$GITHUB_WORKSPACE"'
