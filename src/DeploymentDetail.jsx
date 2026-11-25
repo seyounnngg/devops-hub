@@ -28,6 +28,8 @@ function DeploymentDetail() {
     const [builds, setBuilds] = useState([]);
     const [redeploying, setRedeploying] = useState(false);
     const [redeployMessage, setRedeployMessage] = useState('');
+    const [deleting, setDeleting] = useState(false);
+    const [deleteMessage, setDeleteMessage] = useState('');
     // Bumping this restarts the polling loop below — needed because that loop
     // stops once the deployment reaches 'running' (nothing left to watch), but
     // a fresh redeploy needs live progress again even though the *old*
@@ -581,21 +583,30 @@ function DeploymentDetail() {
 
                 <button
                     onClick={async () => {
-                        if (!confirm('Delete this deployment record?')) return;
+                        if (deleting || !confirm('Delete this deployment record?')) return;
+                        setDeleting(true);
+                        setDeleteMessage('');
                         try {
                             if (deployment?.id) {
                                 await deleteDeployment(deployment.id);
                             }
+                            navigate('/dashboard');
                         } catch (e) {
+                            // e.g. 409 while a redeploy/rollback of this project is running:
+                            // stay on the page and say why — the project was NOT deleted.
                             console.error(e);
+                            setDeleteMessage(e.message || 'Delete failed.');
+                        } finally {
+                            setDeleting(false);
                         }
-                        navigate('/dashboard');
                     }}
-                    className="px-5 py-2.5 text-sm font-medium bg-red-600 hover:bg-red-500 text-white rounded-2xl transition ml-auto"
+                    disabled={deleting}
+                    className="px-5 py-2.5 text-sm font-medium bg-red-600 hover:bg-red-500 text-white rounded-2xl transition ml-auto disabled:opacity-60"
                 >
-                    Delete Record
+                    {deleting ? 'Deleting...' : 'Delete Record'}
                 </button>
             </div>
+            {deleteMessage && <p className="text-xs text-red-400 mt-2 text-right">{deleteMessage}</p>}
 
             {effectiveIsFailed && (
                 <div className="mt-4 text-sm text-red-600 dark:text-red-400">

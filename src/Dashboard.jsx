@@ -63,7 +63,13 @@ function Dashboard() {
 
     async function handleDelete(id) {
         if (!confirm("Delete this deployment?")) return;
-        await deleteDeployment(id);
+        try {
+            await deleteDeployment(id);
+        } catch (e) {
+            // e.g. 409 while a redeploy/rollback of this project is running — not deleted.
+            console.error(e);
+            alert(`Not deleted: ${e.message || 'Delete failed.'}`);
+        }
         loadDeployments();
     }
 
