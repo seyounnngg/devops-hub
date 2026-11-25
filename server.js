@@ -19,6 +19,7 @@ const { assertSafeProjectName, assertSafeRepository, assertSafeBranch, assertSaf
 const { verifyWebhookSignature } = require('./utils/verifyWebhookSignature');
 const deployLock = require('./utils/deployLock');
 const { resolveInternalPort } = require('./utils/internalPort');
+const { deleteDeploymentRecords, deleteUserRecords } = require('./utils/deploymentCleanup');
 
 // Ensure directories that will be used for builds and APK artifacts
 const { APK_DIR, APK_BUILD_DIR } = require('./utils/paths');
@@ -342,8 +343,9 @@ app.delete('/me', async (req, res) => {
             await removeDeploymentResources(deployment);
         }
 
-        await pool.execute('DELETE FROM deployment_logs WHERE github_user_id = ?', [user.id]);
-        await pool.execute('DELETE FROM deployments WHERE github_user_id = ?', [user.id]);
+        // K21: builds too (they used to be left behind), all in one transaction.
+        await deleteUserRecords(pool, user.id);
+        for (const d of deployments) delete deploymentLogs[logsKey(user.id, d.project_name)];
         await pool.execute('DELETE FROM user_sessions WHERE github_user_id = ?', [user.id]);
 
         res.clearCookie('session', sessionCookieOptions());
@@ -1285,7 +1287,10 @@ app.delete('/deployments/:id', async (req, res) => {
         // deployment would recreate its container/proxy after the delete.
         await withDeploymentLock(rows[0].id, 'delete', async (deployment) => {
             await removeDeploymentResources(deployment);
-            await pool.execute('DELETE FROM deployments WHERE id = ?', [id]);
+            // K21: builds + deployment + (if no other row of that name) logs, in one transaction.
+            const removed = await deleteDeploymentRecords(pool, deployment);
+            if (removed.logs > 0) delete deploymentLogs[logsKey(user.id, deployment.project_name)];
+            console.log(`[delete] #${deployment.id} ${deployment.project_name}: removed ${removed.builds} build(s), ${removed.logs} log row(s)`);
         });
 
         res.json({ success: true });
