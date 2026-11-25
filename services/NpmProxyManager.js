@@ -14,10 +14,11 @@
  */
 
 const axios = require('axios');
+const { appBindHost } = require('../utils/appUpstream');
 
-// No hardcoded infrastructure IP fallback here on purpose — NPM_API_URL and
-// SERVER_HOST must come from the environment. Silently falling back to a
-// real internal IP previously leaked infra details into the source tree.
+// NPM_API_URL must come from the environment. Proxy Hosts forward to the
+// host-internal address deployed apps are published on (utils/appUpstream.js),
+// never to the public IP — that used to require the router's DMZ.
 
 function slugifyForDomain(name) {
   if (!name) return 'app';
@@ -54,20 +55,22 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
   const npmApiUrl = process.env.NPM_API_URL || '';
   const npmEmail = process.env.NPM_EMAIL || '';
   const npmPassword = process.env.NPM_PASSWORD || '';
-  const serverHost = process.env.SERVER_HOST || '';
+  const upstreamHost = appBindHost();
 
   const autoSslEnabled = (process.env.AUTO_SSL_ENABLED || 'false').toLowerCase() === 'true';
 
   const domain = `${slugifyForDomain(projectName)}.hgu.app`;
-  const httpUrl = serverHost ? `http://${serverHost}:${forwardPort}` : null;
+  // Apps are not reachable on a host port from outside any more, so there is no
+  // port-URL fallback: without a Proxy Host the app is not reachable.
+  const httpUrl = null;
   const httpsUrl = `https://${domain}`;
 
   if (!forwardPort || forwardPort < 1) {
     return { success: false, url: null, error: 'No forward port' };
   }
 
-  if (!npmApiUrl || !serverHost) {
-    addLog('⚠️ [NPM] NPM_API_URL / SERVER_HOST not configured. Skipping Proxy Host creation.');
+  if (!npmApiUrl) {
+    addLog('⚠️ [NPM] NPM_API_URL not configured. Skipping Proxy Host creation.');
     return { success: false, url: httpUrl, error: 'NPM endpoint not configured' };
   }
 
@@ -86,11 +89,11 @@ async function createProxyHost({ projectName, forwardPort, addLog = console.log 
 
   let proxyHostId;
   try {
-    addLog(`🔗 [NPM] Creating Proxy Host ${domain} → ${serverHost}:${forwardPort}...`);
+    addLog(`🔗 [NPM] Creating Proxy Host ${domain} → ${upstreamHost}:${forwardPort}...`);
 
     const proxyPayload = {
       domain_names: [domain],
-      forward_host: serverHost,
+      forward_host: upstreamHost,
       forward_port: Number(forwardPort),
       forward_scheme: 'http',
       access_list_id: 0,
@@ -232,7 +235,9 @@ async function deleteProxyHost({ projectName, addLog = console.log }) {
 }
 
 /**
- * Repoint an existing Proxy Host at a new forward_port — used by
+ * Repoint an existing Proxy Host at a new forward_port (and forward_host, so
+ * Proxy Hosts created when they pointed at the public IP are migrated on their
+ * next redeploy/rollback) — used by
  * redeploy-in-place (webDeployer.js): the new container is built, started,
  * and health-checked on its own port first, then traffic is switched to it
  * here, and only *after* that does the caller stop the old container. No
@@ -262,11 +267,12 @@ async function updateProxyHost({ projectName, forwardPort, addLog = console.log 
       return { success: false, error: `No Proxy Host found for ${domain}` };
     }
 
-    await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, { forward_port: Number(forwardPort) }, {
+    const upstreamHost = appBindHost();
+    await axios.put(`${npmApiUrl}/nginx/proxy-hosts/${match.id}`, { forward_host: upstreamHost, forward_port: Number(forwardPort) }, {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       timeout: 30000
     });
-    addLog(`✅ [NPM] ${domain} now points at port ${forwardPort}.`);
+    addLog(`✅ [NPM] ${domain} now points at ${upstreamHost}:${forwardPort}.`);
     return { success: true };
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : (err.message || 'unknown error');

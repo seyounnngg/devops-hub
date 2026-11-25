@@ -5,12 +5,13 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { safeInsertDeployment, recordBuild } = require('../utils/dbHelpers');
-const { createProxyHost, updateProxyHost } = require('./NpmProxyManager');
+const { createProxyHost, updateProxyHost, slugifyForDomain } = require('./NpmProxyManager');
 const { cloneRepo, cloneRepoAtCommit } = require('../utils/gitClone');
 const { allocatePort } = require('../utils/allocatePort');
 const { registerWebhook } = require('../utils/githubWebhook');
 const { assertSafeContainerPath } = require('../utils/validate');
 const { DEPLOYMENTS_DIR } = require('../utils/paths');
+const { publishSpec, appBindHost } = require('../utils/appUpstream');
 
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'https://api.hgu.app';
 
@@ -126,13 +127,10 @@ async function deploy(params, { addLog }) {
 
     const externalPort = await allocatePort(pool);
 
+    // The app's host port is published only on a host-internal address (see
+    // utils/appUpstream.js), so the subdomain via NPM is the only public URL.
     const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || 'hgu.app';
-    const idealUrl = `https://${projectName}.${PUBLIC_DOMAIN}`;
-
-    const serverHost = process.env.SERVER_HOST || process.env.HOSTNAME || 'localhost';
-    const practicalUrl = `http://${serverHost}:${externalPort}`;
-
-    const url = (PUBLIC_DOMAIN && PUBLIC_DOMAIN !== 'hgu.app') ? idealUrl : practicalUrl;
+    const url = `https://${slugifyForDomain(projectName)}.${PUBLIC_DOMAIN}`;
 
     if (isRedeploy) {
         addLog(`🔁 Redeploying ${projectName} (previous container: ${existingDeployment.container_name})`);
@@ -270,7 +268,7 @@ async function deploy(params, { addLog }) {
             '--restart', 'unless-stopped',
             '--memory', memLimit,
             '--cpus', CPU_LIMIT,
-            '-p', `${externalPort}:${internalPort}`,
+            '-p', publishSpec(externalPort, internalPort),
             ...envArgs,
             ...volumeArgs,
             imageName
@@ -358,13 +356,13 @@ async function deploy(params, { addLog }) {
             addLog('✅ [5/6] Traffic switched to the new container; previous one removed');
         } else {
             finalUrl = url;
-            addLog(`🌐 Service is now accessible at: ${practicalUrl}`);
+            addLog(`🔌 Container published on ${appBindHost()}:${externalPort} (host-internal; public access is through the domain only)`);
             try {
                 const proxyResult = await createProxyHost({ projectName, forwardPort: externalPort, addLog });
                 if (proxyResult.success && proxyResult.url) {
                     finalUrl = proxyResult.url;
                 } else if (proxyResult.error) {
-                    addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. Using port URL.`);
+                    addLog(`⚠️ [NPM] Proxy Host creation failed: ${proxyResult.error}. The app is running but NOT reachable from outside until a Proxy Host exists (try Redeploy).`);
                 }
             } catch (proxyErr) {
                 addLog(`⚠️ [NPM] Unexpected error creating Proxy Host (deployment continues): ${proxyErr.message}`);
@@ -425,9 +423,6 @@ async function deploy(params, { addLog }) {
 
         addLog('✅ [6/6] Web service is now live');
         addLog(`🌐 Final access URL: ${finalUrl}`);
-        if (!isRedeploy && (!PUBLIC_DOMAIN || PUBLIC_DOMAIN === 'hgu.app')) {
-            addLog('   (Subdomain may not work in lab environments without DNS setup — use the port URL above.)');
-        }
 
         await cleanupProjectDir(projectPath, addLog);
 
