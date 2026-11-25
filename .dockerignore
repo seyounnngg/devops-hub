@@ -1,0 +1,14 @@
+# .env.production(VITE_API_BASE)은 빌드에 필요하므로 제외하지 않는다. 그 밖의 .env 계열은 넣지 않는다.
+.env
+.env.local
+.env.*.local
+*.bak*
+node_modules
+dist
+dist-ssr
+*.log
+.git
+.github
+.vscode
+.idea
+.DS_Store

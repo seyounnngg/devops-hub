@@ -1,19 +1,27 @@
 name: Deploy Frontend
 
+# 안전 조건은 backend 브랜치의 deploy.yml과 같다: push(frontend 브랜치)에만 반응, PR 계열 트리거 금지.
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "frontend" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    if: github.repository == 'seyounnngg/devops-hub' && github.event_name == 'push'
+    runs-on: [self-hosted, f1-server]
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Build and Run Docker Container
-        run: |
-          docker build -t hub-frontend-image .
-          docker stop hub-frontend-app || true
-          docker rm hub-frontend-app || true
-          docker run -d -p 8080:80 --name hub-frontend-app --network devops-network hub-frontend-image
+      # .env.production(VITE_API_BASE, 비밀값 아님)은 frontend 브랜치에 커밋돼 있어 체크아웃에 함께 있다.
+      - name: Deploy
+        run: '"$HOME/deploy-frontend.sh" "$GITHUB_WORKSPACE"'
